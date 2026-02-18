@@ -1,4 +1,4 @@
-
+version: '3.8'
 
 services:
   db:
@@ -13,6 +13,25 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d maxvolt_battery_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: .
+    container_name: maxvolt_backend
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-password}@db:5432/${DB_NAME:-maxvolt_battery_db}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app  # Hot-reloading: Syncs your local code with the container
 
   pgadmin:
     image: dpage/pgadmin4
@@ -26,6 +45,5 @@ services:
     depends_on:
       - db
 
-  
 volumes:
   postgres_data:
