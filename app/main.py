@@ -29,6 +29,8 @@ app.include_router(welding_router.router)
 app.include_router(pdi_router.router)
 app.include_router(dispatch_router.router)
 app.include_router(report_router.router)
+from app.routers import admin_router
+app.include_router(admin_router.router)
 
 @app.get("/")
 def home():
