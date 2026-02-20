@@ -5,12 +5,13 @@ import io
 from app.database import get_db
 from app.models.cell import Cell, CellGrading
 from app.services.cell_service import update_cell_grading_logic, update_sorting_data
+from app.core.signals import trigger_dashboard_update
 
 
 router = APIRouter(prefix="/cells", tags=["Cell Management"])
 
 @router.post("/register/{cell_id}")
-def register_cell(cell_id: str, db: Session = Depends(get_db)):
+async def register_cell(cell_id: str, db: Session = Depends(get_db)):
     # Check if cell exists
     existing = db.query(Cell).filter(Cell.cell_id == cell_id).first()
     if existing:
@@ -20,6 +21,7 @@ def register_cell(cell_id: str, db: Session = Depends(get_db)):
     db.add(new_cell)
     db.commit()
     db.refresh(new_cell) 
+    await trigger_dashboard_update()
     return {"message": "Cell registered successfully", "cell": new_cell.cell_id}
 
 @router.get("/recent-registrations")
