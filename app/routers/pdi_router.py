@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.pdi import PDIReport
 from app.models.battery_pack import Battery
+from app.core.signals import trigger_dashboard_update
 
 router = APIRouter(prefix="/pdi", tags=["Pre-Delivery Inspection"])
 
@@ -58,6 +59,7 @@ async def upload_batch_pdi(files: List[UploadFile] = File(...), db: Session = De
 
     # Single commit for all 150 files makes this very fast
     db.commit()
+    await trigger_dashboard_update()
 
     return {
         "status": "Process Complete",

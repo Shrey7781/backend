@@ -6,6 +6,7 @@ from app.database import get_db
 from app.models.dispatch import Dispatch
 from app.models.battery_pack import Battery
 from app.models.pdi import PDIReport
+from app.core.signals import trigger_dashboard_update
 
 router = APIRouter(prefix="/dispatch", tags=["Dispatch & Sales"])
 
@@ -45,6 +46,7 @@ async def register_dispatch(data: DispatchRequest, db: Session = Depends(get_db)
         )
         db.add(new_dispatch)
         db.commit()
+        await trigger_dashboard_update()
         return {"status": "Success", "message": f"Battery {data.battery_id} dispatched to {data.customer_name}"}
     except Exception as e:
         db.rollback()

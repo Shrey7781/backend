@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import List
 import io
 import pandas as pd
+from app.core.signals import trigger_dashboard_update
 
 # --- SCHEMAS (To make Swagger work) ---
 class BatteryRegistrationRequest(BaseModel):
@@ -44,6 +45,7 @@ async def register_battery(data: BatteryRegistrationRequest, db: Session = Depen
     db.add(new_battery)
     db.commit()
     db.refresh(new_battery)
+    await trigger_dashboard_update()
 
     return {
         "status": "Success",
@@ -128,6 +130,7 @@ async def assign_cells_to_battery(data: AssignCellsRequest, db: Session = Depend
             cell.is_used = True
         
         db.commit()
+        await trigger_dashboard_update()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -214,6 +217,7 @@ async def upload_pack_report_excel(file: UploadFile = File(...), db: Session = D
                 db.add(new_report)
 
         db.commit()
+        await trigger_dashboard_update()
 
         return {
             "status": "Success",

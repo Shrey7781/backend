@@ -61,6 +61,7 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
             summary["success"] += 1
 
     db.commit()
+    await trigger_dashboard_update()
     return {"status": "Complete", "summary": summary}
 
 @router.post("/upload-sorting")

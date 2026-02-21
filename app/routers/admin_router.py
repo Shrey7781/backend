@@ -123,7 +123,7 @@ async def get_admin_dashboard(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Dashboard calculation failed")
 
 @router.websocket("/ws/dashboard")
-async def websocket_dashboard(websocket: WebSocket):
+async def websocket_dashboard(websocket: WebSocket, token: Optional[str] = Query(None)):
     await manager.connect(websocket)
     try:
         while True:
@@ -146,62 +146,64 @@ async def get_cell_inventory(
     page_size: int = Query(20, ge=1),
     cell_id: Optional[str] = None,
     status: Optional[str] = None,
-    model: Optional[str] = None,
+    model: Optional[str] = None, # This will now filter by 'brand' in grading
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     db: Session = Depends(get_db)
 ):
     try:
-     
-        query = db.query(Cell)
+        # We use an outer join so we still see cells that haven't been graded yet
+        query = db.query(Cell).outerjoin(CellGrading)
 
         if cell_id:
             query = query.filter(Cell.cell_id.ilike(f"%{cell_id}%"))
         
+        # If 'model' is provided, we filter by the 'brand' column in CellGrading
         if model:
-            query = query.filter(Cell.model_id == model)
+            query = query.filter(CellGrading.brand.ilike(f"%{model}%"))
             
         if status:
-           
             if status == "REGISTERED":
-                query = query.outerjoin(CellGrading).filter(CellGrading.id == None)
+                query = query.filter(CellGrading.id == None)
             elif status == "GRADED":
-                query = query.join(CellGrading).filter(CellGrading.final_result == 'PASS')
+                query = query.filter(CellGrading.final_result == 'PASS')
             elif status == "ASSIGNED":
-                query = query.join(BatteryCellMapping)
+                query = query.filter(Cell.is_used == True)
             elif status == "FAILED":
-                query = query.join(CellGrading).filter(CellGrading.final_result == 'FAIL')
+                query = query.filter(CellGrading.final_result == 'FAIL')
 
+        # FIX: Changed created_at to registration_date (from your model)
         if date_from:
-            query = query.filter(func.date(Cell.created_at) >= date_from)
+            query = query.filter(func.date(Cell.registration_date) >= date_from)
         
         if date_to:
-            query = query.filter(func.date(Cell.created_at) <= date_to)
-
+            query = query.filter(func.date(Cell.registration_date) <= date_to)
 
         total_items = query.count()
         total_pages = (total_items + page_size - 1) // page_size
         offset = (page - 1) * page_size
         
-        items = query.order_by(Cell.created_at.desc()).offset(offset).limit(page_size).all()
+        # FIX: Sort by registration_date
+        items = query.order_by(Cell.registration_date.desc()).offset(offset).limit(page_size).all()
 
-       
         formatted_items = []
         for item in items:
+            # Check the first grading record (if it exists)
+            grading = item.gradings[0] if item.gradings else None
+            
             current_status = "REGISTERED"
-            is_assigned = db.query(BatteryCellMapping).filter(BatteryCellMapping.cell_id == item.cell_id).first()
-            if is_assigned:
+            if item.is_used:
                 current_status = "ASSIGNED"
-            else:
-                grading = db.query(CellGrading).filter(CellGrading.cell_id == item.cell_id).first()
-                if grading:
-                    current_status = "GRADED" if grading.final_result == "PASS" else "FAILED"
+            elif grading:
+                current_status = "GRADED" if grading.final_result == "PASS" else "FAILED"
 
             formatted_items.append({
                 "cell_id": item.cell_id,
-                "model": item.model_id,
+                "model": grading.brand if grading else "N/A", # Using Brand as Model
                 "status": current_status,
-                "registered_at": item.created_at.isoformat() if item.created_at else None
+                "registered_at": item.registration_date.isoformat() if item.registration_date else None,
+                "voltage": item.sorting_voltage,
+                "ir": item.ir_value_m_ohm
             })
 
         return {
@@ -215,10 +217,11 @@ async def get_cell_inventory(
         }
 
     except Exception as e:
+        import traceback
+        traceback.print_exc() 
         print(f"Inventory Error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to fetch cell inventory")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     
-
 @router.get("/traceability")
 async def get_battery_traceability(
     page: int = Query(1, ge=1),
@@ -230,17 +233,19 @@ async def get_battery_traceability(
     db: Session = Depends(get_db)
 ):
     try:
-        query = db.query(Battery).join(BatteryModel, Battery.model_id == BatteryModel.model_id)
+        # Join Battery with its Model template
+        query = db.query(Battery)
 
         if battery_id:
             query = query.filter(Battery.battery_id.ilike(f"%{battery_id}%"))
         
+        # Date Filtering (Confirmed: created_at exists in your model)
         if date_from:
             query = query.filter(func.date(Battery.created_at) >= date_from)
-        
         if date_to:
             query = query.filter(func.date(Battery.created_at) <= date_to)
 
+        # Status Filtering logic
         if status:
             if status == "dispatched":
                 query = query.join(Dispatch)
@@ -248,6 +253,7 @@ async def get_battery_traceability(
                 query = query.join(PDIReport)
             elif status == "failed":
                 query = query.filter(Battery.had_ng_status == True)
+
         total_items = query.count()
         total_pages = (total_items + page_size - 1) // page_size
         offset = (page - 1) * page_size
@@ -256,18 +262,15 @@ async def get_battery_traceability(
 
         results = []
         for b in batteries:
-      
+            # 1. Fetch linked records
             bms_record = db.query(BMS).filter(BMS.battery_id == b.battery_id).first()
             pack_test = db.query(PackTest).filter(PackTest.battery_id == b.battery_id).first()
             pdi = db.query(PDIReport).filter(PDIReport.battery_id == b.battery_id).first()
             dispatch = db.query(Dispatch).filter(Dispatch.battery_id == b.battery_id).first()
     
-            cell_mappings = db.query(BatteryCellMapping.cell_id).filter(
-                BatteryCellMapping.battery_id == b.battery_id
-            ).all()
-            cell_ids = [m[0] for m in cell_mappings]
+        
 
-     
+            # 3. Determine display status
             current_status = "REGISTERED"
             if dispatch: current_status = "DISPATCHED"
             elif pdi: current_status = "PDI_DONE"
@@ -276,16 +279,16 @@ async def get_battery_traceability(
             results.append({
                 "battery_id": b.battery_id,
                 "model": b.model_id,
-                "bms_id": bms_record.bms_sl_no if bms_record else None,
-                "grading_result": pack_test.test_result if pack_test else "PENDING",
+                # FIX: Use bms_id from your BMS model
+                "bms_id": bms_record.bms_id if bms_record else "Not Assigned",
+                # FIX: Use final_result from PackTest model
+                "grading_result": pack_test.final_result if pack_test else "PENDING",
                 "pdi_result": pdi.test_result if pdi else "PENDING",
                 "status": current_status,
-                "created_at": b.created_at.strftime("%Y-%m-%d %H:%M"),
-     
-                "assembled_at": b.created_at.strftime("%d-%b-%Y"),
+                "created_at": b.created_at.strftime("%Y-%m-%d %H:%M") if b.created_at else "N/A",
+                "assembled_at": b.created_at.strftime("%d-%b-%Y") if b.created_at else "N/A",
                 "dispatch_destination": dispatch.customer_name if dispatch else None,
-                "dispatched_at": dispatch.dispatch_timestamp.strftime("%Y-%m-%d") if dispatch else None,
-                "cells": cell_ids
+                
             })
 
         return {
@@ -299,5 +302,7 @@ async def get_battery_traceability(
         }
 
     except Exception as e:
+        import traceback
+        traceback.print_exc() 
         print(f"Traceability Error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Traceability lookup failed")
+        raise HTTPException(status_code=500, detail=f"Traceability failed: {str(e)}")
