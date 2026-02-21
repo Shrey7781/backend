@@ -302,3 +302,10 @@ async def get_battery_traceability(
         traceback.print_exc() 
         print(f"Traceability Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Traceability failed: {str(e)}")
+    
+
+@router.get("/cells/brands")
+async def get_unique_brands(db: Session = Depends(get_db)):
+    # This gets unique values from the 'model' column (or 'model_name')
+    brands = db.query(CellGrading.brand).distinct().all()
+    return {"success": True, "data": [b[0] for b in brands if b[0]]}
