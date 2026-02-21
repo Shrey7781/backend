@@ -26,7 +26,7 @@ router = APIRouter(prefix="/batteries", tags=["Battery Production"])
 
 @router.post("/register")
 async def register_battery(data: BatteryRegistrationRequest, db: Session = Depends(get_db)):
-    # Use 'data' (the Pydantic object) instead of 'request'
+
     battery_id = data.battery_id
     model_id = data.model_id
 

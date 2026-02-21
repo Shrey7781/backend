@@ -6,7 +6,7 @@ class PDIReport(Base):
     __tablename__ = "pdi_reports"
 
     id = Column(Integer, primary_key=True, index=True)
-    # Unique constraint allows us to find and overwrite specific battery data
+   
     battery_id = Column(String, ForeignKey("batteries.battery_id"), unique=True)
     
     # Core Parameters

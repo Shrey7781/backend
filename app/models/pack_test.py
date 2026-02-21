@@ -7,7 +7,7 @@ class PackTest(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     
-    # Mapping "Barcode" to our system's battery_id
+    
     battery_id = Column(String, ForeignKey("batteries.battery_id"), unique=True)
     
     # Core Details

@@ -146,19 +146,19 @@ async def get_cell_inventory(
     page_size: int = Query(20, ge=1),
     cell_id: Optional[str] = None,
     status: Optional[str] = None,
-    model: Optional[str] = None, # This will now filter by 'brand' in grading
+    model: Optional[str] = None, 
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     db: Session = Depends(get_db)
 ):
     try:
-        # We use an outer join so we still see cells that haven't been graded yet
+        
         query = db.query(Cell).outerjoin(CellGrading)
 
         if cell_id:
             query = query.filter(Cell.cell_id.ilike(f"%{cell_id}%"))
         
-        # If 'model' is provided, we filter by the 'brand' column in CellGrading
+       
         if model:
             query = query.filter(CellGrading.brand.ilike(f"%{model}%"))
             
@@ -172,7 +172,7 @@ async def get_cell_inventory(
             elif status == "FAILED":
                 query = query.filter(CellGrading.final_result == 'FAIL')
 
-        # FIX: Changed created_at to registration_date (from your model)
+        
         if date_from:
             query = query.filter(func.date(Cell.registration_date) >= date_from)
         
@@ -182,13 +182,12 @@ async def get_cell_inventory(
         total_items = query.count()
         total_pages = (total_items + page_size - 1) // page_size
         offset = (page - 1) * page_size
-        
-        # FIX: Sort by registration_date
+      
         items = query.order_by(Cell.registration_date.desc()).offset(offset).limit(page_size).all()
 
         formatted_items = []
         for item in items:
-            # Check the first grading record (if it exists)
+         
             grading = item.gradings[0] if item.gradings else None
             
             current_status = "REGISTERED"
@@ -233,19 +232,18 @@ async def get_battery_traceability(
     db: Session = Depends(get_db)
 ):
     try:
-        # Join Battery with its Model template
         query = db.query(Battery)
 
         if battery_id:
             query = query.filter(Battery.battery_id.ilike(f"%{battery_id}%"))
         
-        # Date Filtering (Confirmed: created_at exists in your model)
+       
         if date_from:
             query = query.filter(func.date(Battery.created_at) >= date_from)
         if date_to:
             query = query.filter(func.date(Battery.created_at) <= date_to)
 
-        # Status Filtering logic
+      
         if status:
             if status == "dispatched":
                 query = query.join(Dispatch)
@@ -262,7 +260,7 @@ async def get_battery_traceability(
 
         results = []
         for b in batteries:
-            # 1. Fetch linked records
+       
             bms_record = db.query(BMS).filter(BMS.battery_id == b.battery_id).first()
             pack_test = db.query(PackTest).filter(PackTest.battery_id == b.battery_id).first()
             pdi = db.query(PDIReport).filter(PDIReport.battery_id == b.battery_id).first()
@@ -270,7 +268,6 @@ async def get_battery_traceability(
     
         
 
-            # 3. Determine display status
             current_status = "REGISTERED"
             if dispatch: current_status = "DISPATCHED"
             elif pdi: current_status = "PDI_DONE"
@@ -279,9 +276,8 @@ async def get_battery_traceability(
             results.append({
                 "battery_id": b.battery_id,
                 "model": b.model_id,
-                # FIX: Use bms_id from your BMS model
+          
                 "bms_id": bms_record.bms_id if bms_record else "Not Assigned",
-                # FIX: Use final_result from PackTest model
                 "grading_result": pack_test.final_result if pack_test else "PENDING",
                 "pdi_result": pdi.test_result if pdi else "PENDING",
                 "status": current_status,

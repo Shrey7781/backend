@@ -9,7 +9,6 @@ class WeldingType(enum.Enum):
 class BatteryModel(Base):
     __tablename__ = "battery_models"
 
-    # Unique Identifier for the Battery Model (e.g., "EV-PACK-48V-26Ah")
     model_id = Column(String, primary_key=True, index=True)
     category = Column(String, nullable=False) # e.g., e-Rickshaw, Scooter, Solar
 
