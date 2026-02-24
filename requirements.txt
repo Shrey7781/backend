@@ -14,3 +14,4 @@ xlsxwriter
 # Utilities
 python-dotenv
 python-multipart
+passlib[bcrypt]
