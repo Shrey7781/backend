@@ -64,3 +64,21 @@ def get_welding_type(battery_id: str, db: Session = Depends(get_db)):
         "battery_id": battery_id,
         "welding_type": welding_type,
     }
+
+@router.patch("/{battery_id}/mark-ready")
+def update_to_ready(battery_id: str, db: Session = Depends(get_db)):
+    battery = db.query(Battery).filter(Battery.battery_id == battery_id).first()
+    
+    if not battery:
+        raise HTTPException(status_code=404, detail="Battery not found")
+        
+    # Validation: Can only move to Ready if it has passed PDI (FG PENDING)
+    if battery.overall_status != "FG PENDING":
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot mark as READY. Current status is {battery.overall_status}"
+        )
+
+    battery.overall_status = "READY TO DISPATCH"
+    db.commit()
+    return {"status": "success", "new_status": battery.overall_status}

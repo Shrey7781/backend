@@ -1,6 +1,7 @@
 from sqlalchemy import Column, String, Integer, Float, DateTime, ForeignKey
 from app.database import Base
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 
 class PackTest(Base):
     __tablename__ = "pack_testing_reports"
@@ -32,6 +33,7 @@ class PackTest(Base):
 
     # Metadata for the record
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    battery = relationship("Battery", back_populates="pack_test")
 
     def __repr__(self):
         return f"<PackTest {self.battery_id} - Result: {self.final_result}>"

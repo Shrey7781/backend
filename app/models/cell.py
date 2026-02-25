@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, Float, ForeignKey
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, Float, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from app.database import Base 
 from sqlalchemy.sql import func
@@ -51,3 +51,7 @@ class CellGrading(Base):
     
    
     cell = relationship("Cell", back_populates="gradings")
+
+    __table_args__ = (
+        Index('ix_cell_brand_created', 'brand', 'test_date'),
+    )

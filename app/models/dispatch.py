@@ -1,6 +1,7 @@
 from sqlalchemy import Column, String, Integer, Date, DateTime, ForeignKey
 from sqlalchemy.sql import func
 from app.database import Base
+from sqlalchemy.orm import relationship
 
 class Dispatch(Base):
     __tablename__ = "dispatch_records"
@@ -14,3 +15,4 @@ class Dispatch(Base):
     invoice_date = Column(Date, nullable=False)
     
     dispatch_timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    battery = relationship("Battery", back_populates="dispatch_record")

@@ -24,12 +24,17 @@ async def upload_batch_pdi(files: List[UploadFile] = File(...), db: Session = De
 
             for _, row in df.iterrows():
                 bid = str(row['Internal SN']).strip()
-                
+                result_text = str(row.get('Test Result', '')).strip()
                 # 1. Verify battery exists in the system
                 battery = db.query(Battery).filter(Battery.battery_id == bid).first()
                 if not battery:
                     summary["errors"].append({"file": file.filename, "id": bid, "reason": "Not registered"})
                     continue
+                if result_text == "Finished PASS":
+                    battery.overall_status = "FG PENDING"
+                else:
+                    battery.overall_status = "FAILED"
+                    battery.had_ng_status = True
 
                 # 2. OVERWRITE LOGIC: Check for existing PDI record
                 report = db.query(PDIReport).filter(PDIReport.battery_id == bid).first()

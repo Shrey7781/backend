@@ -30,6 +30,14 @@ async def register_dispatch(data: DispatchRequest, db: Session = Depends(get_db)
             status_code=400, 
             detail="Quality Gate Failed: Battery cannot be dispatched without a PASS PDI report."
         )
+    
+    if battery.overall_status != "READY TO DISPATCH":
+        # Provide specific feedback to the operator
+        reason = "PDI not passed" if battery.overall_status == "PROD" else "FG scan pending"
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Dispatch Denied: Current status is {battery.overall_status}. ({reason})"
+        )
 
     # 3. Check if already dispatched
     existing = db.query(Dispatch).filter(Dispatch.battery_id == data.battery_id).first()
@@ -45,7 +53,9 @@ async def register_dispatch(data: DispatchRequest, db: Session = Depends(get_db)
             invoice_date=data.invoice_date
         )
         db.add(new_dispatch)
+        battery.overall_status = "DISPATCHED"
         db.commit()
+        
         await trigger_dashboard_update()
         return {"status": "Success", "message": f"Battery {data.battery_id} dispatched to {data.customer_name}"}
     except Exception as e:

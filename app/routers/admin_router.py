@@ -1,6 +1,6 @@
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, case, literal_column, desc
 
 import traceback
@@ -232,25 +232,29 @@ async def get_battery_traceability(
     db: Session = Depends(get_db)
 ):
     try:
-        query = db.query(Battery)
+        # Use joinedload to fetch relationships in ONE query
+        # This solves the 'N+1' performance problem
+        query = db.query(Battery).options(
+            joinedload(Battery.pdi_reports), # Ensure these match your model relationship names
+            joinedload(Battery.bms_record),
+            joinedload(Battery.dispatch_record),
+            joinedload(Battery.pack_test)
+        )
 
+        # Filters
         if battery_id:
             query = query.filter(Battery.battery_id.ilike(f"%{battery_id}%"))
         
-       
         if date_from:
             query = query.filter(func.date(Battery.created_at) >= date_from)
         if date_to:
             query = query.filter(func.date(Battery.created_at) <= date_to)
 
-      
         if status:
-            if status == "dispatched":
-                query = query.join(Dispatch)
-            elif status == "pdi":
-                query = query.join(PDIReport)
-            elif status == "failed":
+            if status == "failed":
                 query = query.filter(Battery.had_ng_status == True)
+            else:
+                query = query.filter(Battery.overall_status == status.upper())
 
         total_items = query.count()
         total_pages = (total_items + page_size - 1) // page_size
@@ -260,31 +264,24 @@ async def get_battery_traceability(
 
         results = []
         for b in batteries:
-       
-            bms_record = db.query(BMS).filter(BMS.battery_id == b.battery_id).first()
-            pack_test = db.query(PackTest).filter(PackTest.battery_id == b.battery_id).first()
-            pdi = db.query(PDIReport).filter(PDIReport.battery_id == b.battery_id).first()
-            dispatch = db.query(Dispatch).filter(Dispatch.battery_id == b.battery_id).first()
-    
-        
-
-            current_status = "REGISTERED"
-            if dispatch: current_status = "DISPATCHED"
-            elif pdi: current_status = "PDI_DONE"
-            elif pack_test: current_status = "TESTED"
+            # No more db.query() inside this loop! 
+            # Data is already sitting in the 'b' object thanks to joinedload
+            
+            pdi = b.pdi_reports[0] if b.pdi_reports else None # Assuming list relationship
+            bms = b.bms_record # Assuming one-to-one relationship
+            dispatch = b.dispatch_record
+            pack = b.pack_test
 
             results.append({
                 "battery_id": b.battery_id,
                 "model": b.model_id,
-          
-                "bms_id": bms_record.bms_id if bms_record else "Not Assigned",
-                "grading_result": pack_test.final_result if pack_test else "PENDING",
+                "bms_id": bms.bms_id if bms else "Not Assigned",
+                "pack_test_result": pack.final_result if pack else "PENDING",
                 "pdi_result": pdi.test_result if pdi else "PENDING",
-                "status": current_status,
+                "status": b.overall_status, # "FG PENDING", "READY TO DISPATCH", etc.
                 "created_at": b.created_at.strftime("%Y-%m-%d %H:%M") if b.created_at else "N/A",
                 "assembled_at": b.created_at.strftime("%d-%b-%Y") if b.created_at else "N/A",
                 "dispatch_destination": dispatch.customer_name if dispatch else None,
-                
             })
 
         return {
@@ -298,12 +295,7 @@ async def get_battery_traceability(
         }
 
     except Exception as e:
-        import traceback
-        traceback.print_exc() 
-        print(f"Traceability Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Traceability failed: {str(e)}")
-    
-
 @router.get("/cells/brands")
 async def get_unique_brands(db: Session = Depends(get_db)):
     # This gets unique values from the 'model' column (or 'model_name')

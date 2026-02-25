@@ -302,6 +302,8 @@ async def replace_leaked_cell(data: ReplaceCellRequest, db: Session = Depends(ge
         old_cell_record = db.query(Cell).filter(Cell.cell_id == data.old_cell_id).first()
         if old_cell_record:
             old_cell_record.is_used = False
+            old_cell_record.status = "NG"
+            old_cell_record.ng_count+=1
             # Optional: old_cell_record.status = "LEAKED"
 
         # b. Create new cell mapping

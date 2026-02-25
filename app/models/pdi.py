@@ -1,13 +1,14 @@
 from sqlalchemy import Column, String, Integer, Float, DateTime, ForeignKey
 from sqlalchemy.sql import func
 from app.database import Base
+from sqlalchemy.orm import relationship
 
 class PDIReport(Base):
     __tablename__ = "pdi_reports"
 
     id = Column(Integer, primary_key=True, index=True)
    
-    battery_id = Column(String, ForeignKey("batteries.battery_id"), unique=True)
+    battery_id = Column(String, ForeignKey("batteries.battery_id"), index=True)
     
     # Core Parameters
     test_time = Column(DateTime)                      # 'Time' in Excel
@@ -22,3 +23,5 @@ class PDIReport(Base):
 
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    battery = relationship("Battery", back_populates="pdi_reports")
