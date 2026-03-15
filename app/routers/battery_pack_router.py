@@ -4,199 +4,312 @@ from app.database import get_db
 from app.models.pack_test import PackTest
 from app.models.battery_pack import Battery, BatteryCellMapping
 from app.models.battery import BatteryModel
-from app.models.cell import Cell, CellGrading
+from app.models.cell import Cell
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import io
 import pandas as pd
 from app.core.signals import trigger_dashboard_update
 
-# --- SCHEMAS (To make Swagger work) ---
-class BatteryRegistrationRequest(BaseModel):
-    battery_id: str
-    model_id: str
+router = APIRouter(prefix="/batteries", tags=["Battery Production"])
+
+
+# ── Schemas ──────────────────────────────────────────────────────────────────
 
 class AssignCellsRequest(BaseModel):
     battery_id: str
-    cell_ids: List[str]
+    cell_ids:   List[str]
 
-router = APIRouter(prefix="/batteries", tags=["Battery Production"])
+    # All ranges optional — only checked when BOTH bounds are provided
+    cell_ir_lower:       Optional[float] = None
+    cell_ir_upper:       Optional[float] = None
+    cell_voltage_lower:  Optional[float] = None
+    cell_voltage_upper:  Optional[float] = None
+    cell_capacity_lower: Optional[float] = None
+    cell_capacity_upper: Optional[float] = None
 
-# --- ENDPOINTS ---
 
-@router.post("/register")
-async def register_battery(data: BatteryRegistrationRequest, db: Session = Depends(get_db)):
+class ReplaceCellRequest(BaseModel):
+    battery_id:  str
+    old_cell_id: str
+    new_cell_id: str
 
-    battery_id = data.battery_id
-    model_id = data.model_id
 
-    # 1. Verify the Model ID exists
-    model_exists = db.query(BatteryModel).filter(BatteryModel.model_id == model_id).first()
-    if not model_exists:
-        raise HTTPException(status_code=404, detail="Battery Model template not found")
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    # 2. Check if this Battery ID is already registered
-    existing_battery = db.query(Battery).filter(Battery.battery_id == battery_id).first()
-    if existing_battery:
-        raise HTTPException(status_code=400, detail="Battery ID already registered")
+def _validate_cell_ranges(cell: Cell, battery: Battery) -> Optional[dict]:
+    """
+    Check cell parameters against whatever ranges are stored on the Battery
+    record (set at assembly time). A parameter is only checked when BOTH its
+    lower and upper bounds are not None.
 
-    # 3. Create the new Battery record
-    new_battery = Battery(battery_id=battery_id, model_id=model_id)
-    db.add(new_battery)
-    db.commit()
-    db.refresh(new_battery)
-    await trigger_dashboard_update()
+    Returns None if the cell passes all provided checks, or a dict describing
+    the failure if it doesn't.
+    """
+    failures = {}
 
-    return {
-        "status": "Success",
-        "message": f"Battery {battery_id} registered successfully",
-        "data": {
-            "battery_id": new_battery.battery_id,
-            "model_id": new_battery.model_id
-        }
-    }
+    if battery.cell_ir_lower is not None and battery.cell_ir_upper is not None:
+        if cell.ir_value_m_ohm is None or not (
+            battery.cell_ir_lower <= cell.ir_value_m_ohm <= battery.cell_ir_upper
+        ):
+            failures["ir"] = {
+                "actual": cell.ir_value_m_ohm,
+                "expected": f"{battery.cell_ir_lower}–{battery.cell_ir_upper} mΩ"
+            }
+
+    if battery.cell_voltage_lower is not None and battery.cell_voltage_upper is not None:
+        if cell.sorting_voltage is None or not (
+            battery.cell_voltage_lower <= cell.sorting_voltage <= battery.cell_voltage_upper
+        ):
+            failures["voltage"] = {
+                "actual": cell.sorting_voltage,
+                "expected": f"{battery.cell_voltage_lower}–{battery.cell_voltage_upper} V"
+            }
+
+    if battery.cell_capacity_lower is not None and battery.cell_capacity_upper is not None:
+        if cell.discharging_capacity_mah is None or not (
+            battery.cell_capacity_lower <= cell.discharging_capacity_mah <= battery.cell_capacity_upper
+        ):
+            failures["capacity"] = {
+                "actual": cell.discharging_capacity_mah,
+                "expected": f"{battery.cell_capacity_lower}–{battery.cell_capacity_upper} mAh"
+            }
+
+    return failures if failures else None
+
+
+# ── Range-window rules per cell chemistry ─────────────────────────────────────
+#
+#   NMC:  capacity fixed 1035–1040 mAh  |  IR window ≤ 0.20 mΩ  |  voltage window ≤ 0.005 V
+#   LFP:  capacity window ≤ 0.5 mAh     |  IR window ≤ 0.04 mΩ  |  voltage window ≤ 0.004 V
+#
+# These are checked when the operator submits ranges at assembly time,
+# BEFORE any cell values are validated.
+
+_RANGE_RULES = {
+    # NMC: IR window ≤ 0.20 mΩ | voltage window ≤ 0.005 V | capacity window ≤ 5 mAh (no fixed band)
+    "NMC": {
+        "ir_max_window":       0.20,
+        "voltage_max_window":  0.005,
+        "capacity_max_window": 5.0,
+    },
+    # LFP: IR window ≤ 0.04 mΩ | voltage window ≤ 0.004 V | capacity window ≤ 0.5 mAh
+    "LFP": {
+        "ir_max_window":       0.04,
+        "voltage_max_window":  0.004,
+        "capacity_max_window": 0.5,
+    },
+}
+
+def _validate_range_windows(data: "AssignCellsRequest", cell_type: str) -> list[str]:
+    """
+    Validate that the operator-supplied ranges themselves are within allowed
+    tolerances for the given cell chemistry.  Returns a list of error strings
+    (empty = all good).
+    """
+    errors = []
+    rules  = _RANGE_RULES.get(cell_type.upper())
+    if not rules:
+        return errors   # unknown chemistry — skip check
+
+    # ── IR window ──────────────────────────────────────────────────────────
+    if data.cell_ir_lower is not None and data.cell_ir_upper is not None:
+        if data.cell_ir_upper < data.cell_ir_lower:
+            errors.append("IR: upper bound must be ≥ lower bound")
+        else:
+            window = round(data.cell_ir_upper - data.cell_ir_lower, 6)
+            max_w  = rules["ir_max_window"]
+            if window > max_w:
+                errors.append(
+                    f"IR range window is {window} mΩ — "
+                    f"maximum allowed for {cell_type} is {max_w} mΩ"
+                )
+
+    # ── Voltage window ─────────────────────────────────────────────────────
+    if data.cell_voltage_lower is not None and data.cell_voltage_upper is not None:
+        if data.cell_voltage_upper < data.cell_voltage_lower:
+            errors.append("Voltage: upper bound must be ≥ lower bound")
+        else:
+            window = round(data.cell_voltage_upper - data.cell_voltage_lower, 6)
+            max_w  = rules["voltage_max_window"]
+            if window > max_w:
+                errors.append(
+                    f"Voltage range window is {window} V — "
+                    f"maximum allowed for {cell_type} is {max_w} V"
+                )
+
+    # ── Capacity window — same sliding-window logic for both NMC and LFP ────
+    if data.cell_capacity_lower is not None and data.cell_capacity_upper is not None:
+        if data.cell_capacity_upper < data.cell_capacity_lower:
+            errors.append("Capacity: upper bound must be ≥ lower bound")
+        elif rules.get("capacity_max_window") is not None:
+            window = round(data.cell_capacity_upper - data.cell_capacity_lower, 6)
+            max_w  = rules["capacity_max_window"]
+            if window > max_w:
+                errors.append(
+                    f"Capacity range window is {window} mAh — "
+                    f"maximum allowed for {cell_type} is {max_w} mAh"
+                )
+
+    return errors
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
 
 @router.post("/assign-cells")
-async def assign_cells_to_battery(data: AssignCellsRequest, db: Session = Depends(get_db)):
-    battery_id = data.battery_id
-    cell_ids = data.cell_ids 
+async def assign_cells_to_battery(
+    data: AssignCellsRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Scan a battery ID and a list of cell IDs.
+    Optionally provide IR / voltage / capacity ranges — only the ranges that
+    have BOTH lower and upper bounds will be validated.  If no ranges are
+    provided at all, cells pass automatically (no parameter check).
 
-    # 1. Fetch Battery and Model
-    battery = db.query(Battery).filter(Battery.battery_id == battery_id).first()
+    The ranges supplied here are saved permanently on the Battery record for
+    the audit trail.
+    """
+    # 1. Fetch battery
+    battery = db.query(Battery).filter(Battery.battery_id == data.battery_id).first()
     if not battery:
-        raise HTTPException(status_code=404, detail="Battery Serial Number not found")
-    
+        raise HTTPException(status_code=404, detail="Battery ID not found. Use /bulk-import first.")
+
+    # 2. Validate range windows against cell chemistry rules BEFORE saving anything
     model = db.query(BatteryModel).filter(BatteryModel.model_id == battery.model_id).first()
-    if not model:
-        raise HTTPException(status_code=404, detail="Associated Model template missing")
+    if model:
+        range_errors = _validate_range_windows(data, model.cell_type.value)
+        if range_errors:
+            raise HTTPException(status_code=422, detail={
+                "error":       "Supplied ranges violate cell chemistry tolerances",
+                "cell_type":   model.cell_type.value,
+                "violations":  range_errors
+            })
+
+    # 4. Persist the ranges entered this session onto the Battery record
+    #    (overwrites any previously stored ranges — last assembly wins)
+    battery.cell_ir_lower       = data.cell_ir_lower
+    battery.cell_ir_upper       = data.cell_ir_upper
+    battery.cell_voltage_lower  = data.cell_voltage_lower
+    battery.cell_voltage_upper  = data.cell_voltage_upper
+    battery.cell_capacity_lower = data.cell_capacity_lower
+    battery.cell_capacity_upper = data.cell_capacity_upper
 
     invalid_cells = []
     valid_mappings = []
-    cells_to_update = []
+    cells_to_mark  = []
 
-    # 2. Validate each Cell
-    for cid in cell_ids:
+    # 5. Validate each cell
+    for cid in data.cell_ids:
         cell = db.query(Cell).filter(Cell.cell_id == cid).first()
+
         if not cell:
-            invalid_cells.append({"cell_id": cid, "reason": "Cell ID not registered"})
+            invalid_cells.append({"cell_id": cid, "reason": "Cell ID not registered in inventory"})
             continue
-        
+
         if cell.is_used:
-            invalid_cells.append({"cell_id": cid, "reason": "Already assigned elsewhere"})
+            invalid_cells.append({"cell_id": cid, "reason": "Cell already assigned to another pack"})
             continue
 
-        # Safety Check: Ensure the cell actually has test values to compare
-        if any(v is None for v in [cell.ir_value_m_ohm, cell.sorting_voltage, cell.discharging_capacity_mah]):
-            invalid_cells.append({"cell_id": cid, "reason": "Cell missing required sorting/grading data"})
-            continue
-
-        # 3. Parameter Range Checks
-        is_valid = (
-            model.cell_ir_lower <= cell.ir_value_m_ohm <= model.cell_ir_upper and 
-            model.cell_voltage_lower <= cell.sorting_voltage <= model.cell_voltage_upper and
-            model.cell_capacity_lower <= cell.discharging_capacity_mah <= model.cell_capacity_upper
-        )
-
-        if not is_valid:
+        # Parameter range checks (only for ranges that were provided)
+        failures = _validate_cell_ranges(cell, battery)
+        if failures:
             invalid_cells.append({
                 "cell_id": cid,
-                "reason": "Parameter mismatch",
-                "actual_values": {
-                    "ir": cell.ir_value_m_ohm,
-                    "voltage": cell.sorting_voltage,
-                    "capacity": cell.discharging_capacity_mah
-                },
-                "expected_ranges": {
-                    "ir": f"{model.cell_ir_lower}-{model.cell_ir_upper}",
-                    "vol": f"{model.cell_voltage_lower}-{model.cell_voltage_upper}",
-                    "cap": f"{model.cell_capacity_lower}-{model.cell_capacity_upper}"
-                }
+                "reason":  "Parameter out of range",
+                "details": failures
             })
         else:
-            # Everything looks good, prepare for update
-            valid_mappings.append(BatteryCellMapping(battery_id=battery_id, cell_id=cid))
-            cells_to_update.append(cell)
+            valid_mappings.append(BatteryCellMapping(battery_id=data.battery_id, cell_id=cid))
+            cells_to_mark.append(cell)
 
-    # 4. Final Processing
+    # 6. Atomic — reject everything if any cell fails
     if invalid_cells:
-        # If even ONE cell is bad, we don't commit anything (Atomicity)
-        return {"status": "Error", "message": "Validation failed", "invalid_cells": invalid_cells}
+        # Roll back the range save too since we're not committing
+        db.rollback()
+        return {
+            "status":        "Error",
+            "message":       "Validation failed — no cells were assigned",
+            "invalid_cells": invalid_cells
+        }
 
     try:
-        # Create the mapping entries
         db.add_all(valid_mappings)
-        # Update the availability status in the cells table
-        for cell in cells_to_update:
+        for cell in cells_to_mark:
             cell.is_used = True
-        
         db.commit()
         await trigger_dashboard_update()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-    return {
-        "status": "Success", 
-        "message": f"Assigned {len(valid_mappings)} cells to {battery_id}"
+    ranges_applied = {
+        k: v for k, v in {
+            "ir":       f"{data.cell_ir_lower}–{data.cell_ir_upper} mΩ"       if data.cell_ir_lower       is not None else None,
+            "voltage":  f"{data.cell_voltage_lower}–{data.cell_voltage_upper} V"  if data.cell_voltage_lower  is not None else None,
+            "capacity": f"{data.cell_capacity_lower}–{data.cell_capacity_upper} mAh" if data.cell_capacity_lower is not None else None,
+        }.items() if v is not None
     }
 
+    return {
+        "status":        "Success",
+        "message":       f"Assigned {len(valid_mappings)} cells to {data.battery_id}",
+        "ranges_applied": ranges_applied or "None — all cells accepted without parameter checks"
+    }
+
+
 @router.post("/upload-report")
-async def upload_pack_report_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_pack_report_excel(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
     if not file.filename.endswith(('.xlsx', '.xls')):
         raise HTTPException(status_code=400, detail="Please upload an Excel file (.xlsx or .xls)")
 
     try:
         contents = await file.read()
         df = pd.read_excel(io.BytesIO(contents))
-        
-        # Clean column names
         df.columns = df.columns.str.strip()
 
-        skipped_batteries = []
-        ng_marked = []
+        skipped_batteries  = []
+        ng_marked          = []
         passed_and_updated = []
 
         for _, row in df.iterrows():
             bid = str(row['Barcode']).strip()
-            
-            # 1. Fetch Battery Record from the master batteries table
+
             battery = db.query(Battery).filter(Battery.battery_id == bid).first()
-            
             if not battery:
                 skipped_batteries.append(bid)
                 continue
 
-            # 2. Extract Final Result
             current_status = str(row['final Result']).strip().upper()
 
-            # 3. Handle NG Flag Persistence on the Battery model
             if current_status == "FAIL":
                 battery.had_ng_status = True
                 ng_marked.append(bid)
             elif current_status == "PASS":
                 passed_and_updated.append(bid)
 
-            # 4. UPSERT LOGIC: Check if this battery already has a test record
             report = db.query(PackTest).filter(PackTest.battery_id == bid).first()
 
             if report:
-                # UPDATE existing record with latest data
-                report.test_date = row['Date']
-                report.specification = str(row['Specification'])
-                report.cell_type = str(row['Cell type'])
-                report.number_of_series = int(row['Number of sreies'])
-                report.number_of_parallel = int(row['Number of parallel'])
-                report.ocv_voltage = float(row['OCV Voltage(V)'])
-                report.upper_cutoff = float(row['Upper cut off(V)'])
-                report.lower_cutoff = float(row['Lower cut off(V)'])
-                report.discharging_capacity = float(row['Discharging Capacity(Ah)'])
-                report.capacity_result = str(row['Result'])
-                report.idle_difference = float(row['Final idle Different'])
-                report.soc_result = str(row['SOC Result'])
-                report.final_voltage = float(row['Final Voltage'])
-                report.final_result = current_status
+                report.test_date           = row['Date']
+                report.specification       = str(row['Specification'])
+                report.cell_type           = str(row['Cell type'])
+                report.number_of_series    = int(row['Number of sreies'])
+                report.number_of_parallel  = int(row['Number of parallel'])
+                report.ocv_voltage         = float(row['OCV Voltage(V)'])
+                report.upper_cutoff        = float(row['Upper cut off(V)'])
+                report.lower_cutoff        = float(row['Lower cut off(V)'])
+                report.discharging_capacity= float(row['Discharging Capacity(Ah)'])
+                report.capacity_result     = str(row['Result'])
+                report.idle_difference     = float(row['Final idle Different'])
+                report.soc_result          = str(row['SOC Result'])
+                report.final_voltage       = float(row['Final Voltage'])
+                report.final_result        = current_status
             else:
-                # INSERT new record if it doesn't exist
                 new_report = PackTest(
                     battery_id=bid,
                     test_date=row['Date'],
@@ -222,105 +335,72 @@ async def upload_pack_report_excel(file: UploadFile = File(...), db: Session = D
         return {
             "status": "Success",
             "summary": {
-                "total_rows": len(df),
-                "processed": len(ng_marked) + len(passed_and_updated),
-                "marked_as_ng": len(ng_marked),
-                "passed_and_updated": len(passed_and_updated),
-                "skipped_unregistered": skipped_batteries
+                "total_rows":              len(df),
+                "processed":               len(ng_marked) + len(passed_and_updated),
+                "marked_as_ng":            len(ng_marked),
+                "passed_and_updated":      len(passed_and_updated),
+                "skipped_unregistered":    skipped_batteries
             }
         }
 
     except Exception as e:
         db.rollback()
-        print(f"Excel Processing Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing Excel file: {str(e)}")
-    
-from pydantic import BaseModel
+        raise HTTPException(status_code=500, detail=f"Error processing Excel: {str(e)}")
 
-class ReplaceCellRequest(BaseModel):
-    battery_id: str
-    old_cell_id: str
-    new_cell_id: str
 
 @router.post("/replace-cell")
-async def replace_leaked_cell(data: ReplaceCellRequest, db: Session = Depends(get_db)):
-    # 1. Fetch Battery and its Model Template
+async def replace_leaked_cell(
+    data: ReplaceCellRequest,
+    db: Session = Depends(get_db)
+):
+    # 1. Fetch Battery
     battery = db.query(Battery).filter(Battery.battery_id == data.battery_id).first()
     if not battery:
         raise HTTPException(status_code=404, detail="Battery Serial Number not found")
-    
-    model = db.query(BatteryModel).filter(BatteryModel.model_id == battery.model_id).first()
-    if not model:
-        raise HTTPException(status_code=404, detail="Battery Model template not found")
 
-    # 2. Verify the Old Cell is actually in this battery
+    # 2. Verify old cell is in this battery
     old_mapping = db.query(BatteryCellMapping).filter(
         BatteryCellMapping.battery_id == data.battery_id,
-        BatteryCellMapping.cell_id == data.old_cell_id
+        BatteryCellMapping.cell_id    == data.old_cell_id
     ).first()
-    
     if not old_mapping:
-        raise HTTPException(status_code=404, detail="The old cell is not linked to this battery")
+        raise HTTPException(status_code=404, detail="Old cell is not linked to this battery")
 
-    # 3. Fetch and Validate the New Replacement Cell
+    # 3. Fetch new replacement cell
     new_cell = db.query(Cell).filter(Cell.cell_id == data.new_cell_id).first()
     if not new_cell:
-        raise HTTPException(status_code=404, detail="New Replacement Cell ID not found in inventory")
-    
+        raise HTTPException(status_code=404, detail="Replacement Cell ID not found in inventory")
     if new_cell.is_used:
-        raise HTTPException(status_code=400, detail="This replacement cell is already assigned to another pack")
+        raise HTTPException(status_code=400, detail="Replacement cell is already assigned to another pack")
 
-    # 4. Quality Parameter Validation (Same as Assign Cells)
-    if any(v is None for v in [new_cell.ir_value_m_ohm, new_cell.sorting_voltage, new_cell.discharging_capacity_mah]):
-        raise HTTPException(status_code=400, detail="Replacement cell is missing Grading/Sorting data")
-
-    is_valid = (
-        model.cell_ir_lower <= new_cell.ir_value_m_ohm <= model.cell_ir_upper and 
-        model.cell_voltage_lower <= new_cell.sorting_voltage <= model.cell_voltage_upper and
-        model.cell_capacity_lower <= new_cell.discharging_capacity_mah <= model.cell_capacity_upper
-    )
-
-    if not is_valid:
+    # 4. Validate against the ranges that were stored on the battery at assembly time.
+    #    Uses the same helper — respects optional ranges.
+    failures = _validate_cell_ranges(new_cell, battery)
+    if failures:
         raise HTTPException(status_code=400, detail={
-            "error": "Replacement cell does not meet quality standards for this model",
-            "required_ranges": {
-                "ir": f"{model.cell_ir_lower}-{model.cell_ir_upper}",
-                "voltage": f"{model.cell_voltage_lower}-{model.cell_voltage_upper}",
-                "capacity": f"{model.cell_capacity_lower}-{model.cell_capacity_upper}"
-            },
-            "actual_values": {
-                "ir": new_cell.ir_value_m_ohm,
-                "voltage": new_cell.sorting_voltage,
-                "capacity": new_cell.discharging_capacity_mah
-            }
+            "error":   "Replacement cell does not meet the assembly-time quality ranges",
+            "details": failures
         })
 
-    # 5. Atomic Swap Process
+    # 5. Atomic swap
     try:
-        # a. Remove old cell mapping and mark it as unused (or scrap)
         db.delete(old_mapping)
+
         old_cell_record = db.query(Cell).filter(Cell.cell_id == data.old_cell_id).first()
         if old_cell_record:
-            old_cell_record.is_used = False
-            old_cell_record.status = "NG"
-            old_cell_record.ng_count+=1
-            # Optional: old_cell_record.status = "LEAKED"
+            old_cell_record.is_used  = False
+            old_cell_record.status   = "NG"
+            old_cell_record.ng_count += 1
 
-        # b. Create new cell mapping
         new_mapping = BatteryCellMapping(battery_id=data.battery_id, cell_id=data.new_cell_id)
         db.add(new_mapping)
-        
-        # c. Mark new cell as used
-        new_cell.is_used = True
-        
-        # d. Flag the Battery as having a repair history
-        battery.had_ng_status = True
+        new_cell.is_used       = True
+        battery.had_ng_status  = True
 
         db.commit()
         return {
-            "status": "Success",
-            "message": f"Successfully replaced {data.old_cell_id} with {data.new_cell_id}",
-            "pack_id": data.battery_id
+            "status":  "Success",
+            "message": f"Replaced {data.old_cell_id} → {data.new_cell_id} in {data.battery_id}"
         }
 
     except Exception as e:

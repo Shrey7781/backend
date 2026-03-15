@@ -3,55 +3,86 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.bms import BMS
 from app.models.battery_pack import Battery
+from app.models.battery import BatteryModel
 from pydantic import BaseModel
-from typing import List
-
-# --- SCHEMAS (Makes Swagger work) ---
-class BMSRegistrationRequest(BaseModel):
-    bms_id: str
-    bms_model: str
-
-class BMSMappingRequest(BaseModel):
-    bms_id: str
-    battery_id: str
+from app.core.signals import trigger_dashboard_update
 
 router = APIRouter(prefix="/bms", tags=["BMS Management"])
 
-# --- ENDPOINTS ---
 
-@router.post("/register")
-async def register_bms(data: BMSRegistrationRequest, db: Session = Depends(get_db)):
-    existing = db.query(BMS).filter(BMS.bms_id == data.bms_id).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="BMS ID already exists in inventory")
+class BMSMappingRequest(BaseModel):
+    bms_id:     str
+    battery_id: str
 
-    new_bms = BMS(bms_id=data.bms_id, bms_model=data.bms_model)
-    db.add(new_bms)
-    db.commit()
-    return {"status": "Success", "message": f"BMS {data.bms_id} added to inventory"}
+
+# ── Page 6: BMS Mounting — scan battery ID + BMS ID ─────────────────────────
+
+@router.get("/info/{battery_id}")
+def get_bms_info(battery_id: str, db: Session = Depends(get_db)):
+    """
+    Scan battery ID → returns expected BMS model (from battery model template).
+    Frontend shows this so operator can confirm before scanning BMS unit.
+    """
+    result = (
+        db.query(Battery, BatteryModel.bms_model)
+        .join(BatteryModel, Battery.model_id == BatteryModel.model_id)
+        .filter(Battery.battery_id == battery_id)
+        .first()
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Battery ID '{battery_id}' not found")
+
+    battery, bms_model = result
+
+    # Check if BMS already mounted
+    existing_bms = db.query(BMS).filter(BMS.battery_id == battery_id).first()
+
+    return {
+        "battery_id":       battery_id,
+        "model_id":         battery.model_id,
+        "expected_bms_model": bms_model or "Not specified",
+        "bms_already_mounted": existing_bms.bms_id if existing_bms else None,
+    }
+
 
 @router.post("/map-to-battery")
 async def map_bms_to_battery(data: BMSMappingRequest, db: Session = Depends(get_db)):
-    bms = db.query(BMS).filter(BMS.bms_id == data.bms_id).first()
-    if not bms:
-        raise HTTPException(status_code=404, detail="BMS not found")
-    if bms.is_used:
-        raise HTTPException(status_code=400, detail=f"BMS already assigned to {bms.battery_id}")
-
+    """
+    Link a BMS unit to a battery.
+    - BMS units do NOT need pre-registration — auto-created on first scan.
+    - BMS model is inherited from the battery model template, not entered manually.
+    - Prevents same BMS being assigned to two different batteries.
+    """
+    # 1. Verify battery exists
     battery = db.query(Battery).filter(Battery.battery_id == data.battery_id).first()
     if not battery:
-        raise HTTPException(status_code=404, detail="Battery not found")
+        raise HTTPException(status_code=404, detail="Battery ID not found")
 
+    # 2. Get expected BMS model from template
+    model = db.query(BatteryModel).filter(BatteryModel.model_id == battery.model_id).first()
+    expected_bms_model = model.bms_model if model else None
+
+    # 3. Fetch or auto-create BMS unit
+    bms = db.query(BMS).filter(BMS.bms_id == data.bms_id).first()
+    if bms:
+        if bms.is_used and bms.battery_id != data.battery_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"BMS {data.bms_id} is already assigned to battery {bms.battery_id}"
+            )
+    else:
+        bms = BMS(bms_id=data.bms_id)
+        db.add(bms)
+
+    # 4. Link
     bms.battery_id = data.battery_id
-    bms.is_used = True
-    db.commit()
-    return {"status": "Success", "message": f"BMS {data.bms_id} linked to Battery {data.battery_id}"}
+    bms.is_used    = True
 
-@router.get("/models", response_model=List[str])
-def get_unique_bms_models(db: Session = Depends(get_db)):
-    # We remove the .filter(BMS.is_used == False) to see EVERYTHING
-    models = db.query(BMS.bms_model).distinct().all()
-    
-    # SQLAlchemy returns a list of tuples like [('Daly',), ('JK',)], 
-    # so we extract the first element of each tuple.
-    return [m.bms_model for m in models]
+    db.commit()
+    await trigger_dashboard_update()
+
+    return {
+        "status":             "Success",
+        "message":            f"BMS {data.bms_id} linked to Battery {data.battery_id}",
+        "expected_bms_model": expected_bms_model or "Not specified for this model",
+    }
