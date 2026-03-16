@@ -177,7 +177,6 @@ def build_formats(wb):
                         bg_color=C_RED_BG, align="center", border=1, border_color=C_MID_GREY),
         "sc_pend":    f(bold=True, font_size=10, font_color=C_AMBER_FG,
                         bg_color=C_AMBER_BG, align="center", border=1, border_color=C_MID_GREY),
-        # Big KPI number cells for scorecard
         "kpi_num":    f(bold=True, font_size=22, font_color=C_NAVY, bg_color=C_ICE,
                         align="center", valign="vcenter", border=1, border_color=C_MID_GREY),
         "kpi_pass":   f(bold=True, font_size=22, font_color=C_GREEN_FG,
@@ -200,9 +199,6 @@ def build_formats(wb):
 # LAYOUT HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# How many pixels tall is one Excel row-unit (approx for chart placement)
-# We use row numbers directly for insert_chart — xlsxwriter accepts (row, col)
-
 HEADER_ROWS = 5   # rows 0–4 consumed by page header + spacer
 
 
@@ -224,7 +220,7 @@ def add_page_header(ws, wb, fmt, battery_id, sheet_title, subtitle=""):
             "x_scale": 0.48, "y_scale": 0.48,
             "x_offset": 8, "y_offset": 5, "object_position": 1,
         })
-    return HEADER_ROWS  # first data row index
+    return HEADER_ROWS
 
 
 def _vfmt(val_str, fmt, is_alt=False):
@@ -318,18 +314,13 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
 
         # ══════════════════════════════════════════════════════════════════════
         # SHEET 1 — SUMMARY
-        # Layout:
-        #   Col A:B  — Pipeline checklist  (rows 5–18)
-        #   Col A:B  — Battery identity    (rows 20–32)
-        #   Col D:G  — Cell quality KPI scorecard (rows 5–10)
-        #   Col D:G  — Pipeline stacked-bar chart (rows 12–30)
         # ══════════════════════════════════════════════════════════════════════
         ws1 = wb.add_worksheet("Summary")
         ws1.hide_gridlines(2)
         ws1.set_zoom(90)
         ws1.set_column("A:A", 30)
         ws1.set_column("B:B", 22)
-        ws1.set_column("C:C", 3)   # gutter
+        ws1.set_column("C:C", 3)
         ws1.set_column("D:D", 18)
         ws1.set_column("E:E", 18)
         ws1.set_column("F:F", 18)
@@ -354,7 +345,7 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
         ws1.set_row(row, 20)
         ws1.merge_range(row, 0, row, 1, "   PRODUCTION PIPELINE", fmt["sec_hdr"])
         row += 1
-        pipeline_data_row = row   # save for chart reference
+        pipeline_data_row = row
 
         for i, (stage, done) in enumerate(stations):
             ws1.set_row(row, 20)
@@ -399,8 +390,7 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
             ws1.write(row, 1, str(v), _vfmt(str(v), fmt, i % 2 == 1))
             row += 1
 
-        # ── RIGHT SIDE: Cell quality KPI scorecard (cols D:G, rows 5–11) ──────
-        # 4 big KPI tiles: Total Cells | Pass | Fail/NG | Pending
+        # ── RIGHT SIDE: Cell quality KPI scorecard ────────────────────────────
         cell_pass  = sum(1 for c, _ in cells_raw
                          if getattr(c, "status", "").upper() == "PASS")
         cell_fail  = sum(1 for c, _ in cells_raw
@@ -413,7 +403,6 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
                         "   CELL QUALITY SCORECARD", fmt["sec_hdr"])
         kpi_row += 1
 
-        # Row of big numbers
         ws1.set_row(kpi_row, 40)
         ws1.write(kpi_row, 3, len(cells_raw), fmt["kpi_num"])
         ws1.write(kpi_row, 4, cell_pass,      fmt["kpi_pass"])
@@ -421,20 +410,18 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
         ws1.write(kpi_row, 6, cell_pend,      fmt["kpi_warn"] if cell_pend else fmt["kpi_num"])
         kpi_row += 1
 
-        # Row of labels beneath numbers
         ws1.set_row(kpi_row, 22)
         for col_idx, label in enumerate(["TOTAL CELLS", "PASS", "FAIL / NG", "PENDING"]):
             ws1.write(kpi_row, 3 + col_idx, label, fmt["kpi_label"])
         kpi_row += 2
 
-        # ── Pipeline stacked-bar chart (cols D:G, below scorecard) ────────────
-        # Write chart data in a hidden area — cols I:K, rows 5+
+        # ── Pipeline stacked-bar chart data (hidden cols I:K) ─────────────────
         cd_row = HEADER_ROWS
-        ws1.write(cd_row, 8, "Stage",    fmt["th"])
-        ws1.write(cd_row, 9, "Done",     fmt["th"])
-        ws1.write(cd_row, 10,"Pending",  fmt["th"])
+        ws1.write(cd_row, 8, "Stage",   fmt["th"])
+        ws1.write(cd_row, 9, "Done",    fmt["th"])
+        ws1.write(cd_row, 10, "Pending", fmt["th"])
         for i, (stage, done) in enumerate(stations):
-            ws1.write(cd_row + 1 + i, 8,  stage,          fmt["td"])
+            ws1.write(cd_row + 1 + i, 8,  stage,            fmt["td"])
             ws1.write(cd_row + 1 + i, 9,  1 if done else 0, fmt["td"])
             ws1.write(cd_row + 1 + i, 10, 0 if done else 1, fmt["td"])
 
@@ -457,14 +444,10 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
         chart_pipe.set_x_axis({"min": 0, "max": 1, "num_format": "0",
                                "major_gridlines": {"visible": False}})
         chart_pipe.set_size({"width": 460, "height": 250})
-
-        # Insert chart at row kpi_row (below scorecard tiles), col D
         ws1.insert_chart(kpi_row, 3, chart_pipe, {"x_offset": 4, "y_offset": 4})
 
         # ══════════════════════════════════════════════════════════════════════
         # SHEET 2 — BATTERY & MODEL
-        # Layout: Two KV sections left, range section below — all col A:B
-        # Chart: none (pure data sheet)
         # ══════════════════════════════════════════════════════════════════════
         ws2 = wb.add_worksheet("Battery & Model")
         ws2.hide_gridlines(2)
@@ -495,9 +478,6 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
 
         # ══════════════════════════════════════════════════════════════════════
         # SHEET 3 — CELLS
-        # Layout:
-        #   Rows 5 to 5+N   — cell data table (cols 0..17)
-        #   Rows 5+N+3 onward — chart data (hidden cols 18–27) + 3 charts side by side
         # ══════════════════════════════════════════════════════════════════════
         ws3 = wb.add_worksheet("Cells")
         ws3.hide_gridlines(2)
@@ -553,12 +533,11 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
                     cf = fmt["td_alt"] if is_alt else fmt["td"]
                 ws3.write(dr, ci, val, cf)
 
-        # ── Chart data zone — starts 4 rows below last data row ───────────────
-        # This guarantees zero overlap regardless of how many cells there are.
+        # ── Chart data zone ────────────────────────────────────────────────────
         n_cells = len(cells_raw)
-        last_data_row  = hdr_row + n_cells          # last row with cell data
-        chart_data_row = last_data_row + 4          # first row of chart data table
-        chart_row      = chart_data_row + n_cells + 3  # row where charts are inserted
+        last_data_row  = hdr_row + n_cells
+        chart_data_row = last_data_row + 4
+        chart_row      = chart_data_row + n_cells + 3
 
         if n_cells > 0:
             ir_lo   = battery.cell_ir_lower
@@ -568,8 +547,7 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
             cap_lo  = battery.cell_capacity_lower
             cap_hi  = battery.cell_capacity_upper
 
-            # Hidden data cols (far right, won't overlap table cols 0-16)
-            DC = 18   # data column start
+            DC = 18   # hidden data columns start here
 
             headers = ["Index", "IR (mΩ)", "Volt (V)", "Cap (mAh)",
                        "IR Lo", "IR Hi", "V Lo", "V Hi", "Cap Lo", "Cap Hi"]
@@ -635,7 +613,6 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
                 c.set_size({"width": 380, "height": 230})
                 return c
 
-            # Three charts side-by-side starting at chart_row, cols 0, 6, 12
             ws3.insert_chart(chart_row, 0,
                 scatter_band("IR Values (mΩ)",
                     DC+1,
@@ -662,11 +639,6 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
 
         # ══════════════════════════════════════════════════════════════════════
         # SHEET 4 — PACK TEST
-        # Layout:
-        #   Col A:B  — KV data  (rows 5 to end_kv)
-        #   Col D:G  — Voltage chart  (rows 5 onward)
-        #   Col D:G  — Cutoff band chart (rows 20 onward)
-        # Charts are anchored to fixed column D so they never touch col A:B
         # ══════════════════════════════════════════════════════════════════════
         ws4 = wb.add_worksheet("Pack Test")
         ws4.hide_gridlines(2)
@@ -680,12 +652,10 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
                               "Pack Testing", "Battery-Level Test Results")
 
         if pack_test:
-            kv_start = row
             row = write_kv_section(ws4, fmt, row, "Pack Test Report",
                                    obj_pairs(pack_test))
-            kv_end = row   # first free row after KV data
 
-            # Chart data — write to cols I:J (hidden, won't overlap)
+            # Chart 1 data — voltage comparison (cols I:J)
             vdata = [
                 ("OCV Voltage (V)",   pack_test.ocv_voltage    or 0),
                 ("Upper Cutoff (V)",  pack_test.upper_cutoff   or 0),
@@ -697,7 +667,6 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
                 ws4.write(vdr + i, 8, lb, fmt["td"])
                 ws4.write(vdr + i, 9, vv, fmt["td"])
 
-            # Chart 1: Voltage comparison column chart — anchored D5
             chart_v = wb.add_chart({"type": "column"})
             chart_v.add_series({
                 "name":       "Voltage (V)",
@@ -713,18 +682,17 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
             chart_v.set_size({"width": 380, "height": 230})
             ws4.insert_chart(HEADER_ROWS, 3, chart_v, {"x_offset": 4, "y_offset": 4})
 
-            # Chart 2: Pass margin line chart — OCV vs Final Voltage
-            # vs upper/lower cutoff as reference lines
-            # Placed below chart 1 — at row HEADER_ROWS + 15
-            margin_row = HEADER_ROWS + 16
+            # Chart 2 data — measured voltage vs cutoff limits
+            # ── FIX: zip labels and values into (label, value) pairs ──────────
+            margin_row    = HEADER_ROWS + 16
             margin_labels = ["OCV", "Final Voltage"]
             margin_vals   = [pack_test.ocv_voltage or 0, pack_test.final_voltage or 0]
-            hi_val  = pack_test.upper_cutoff or 0
-            lo_val  = pack_test.lower_cutoff or 0
+            hi_val        = pack_test.upper_cutoff or 0
+            lo_val        = pack_test.lower_cutoff or 0
 
-            for i, (lb, vv) in enumerate(margin_labels):
-                ws4.write(margin_row + i, 8, lb, fmt["td"])
-                ws4.write(margin_row + i, 9, margin_vals[i], fmt["td"])
+            for i, (lb, vv) in enumerate(zip(margin_labels, margin_vals)):   # ← FIXED
+                ws4.write(margin_row + i, 8,  lb,     fmt["td"])
+                ws4.write(margin_row + i, 9,  vv,     fmt["td"])
                 ws4.write(margin_row + i, 10, hi_val, fmt["td"])
                 ws4.write(margin_row + i, 11, lo_val, fmt["td"])
 
@@ -765,7 +733,6 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
 
         # ══════════════════════════════════════════════════════════════════════
         # SHEET 5 — PDI REPORT
-        # Layout: KV col A:B — Chart col D:G anchored at row HEADER_ROWS
         # ══════════════════════════════════════════════════════════════════════
         ws5 = wb.add_worksheet("PDI Report")
         ws5.hide_gridlines(2)
@@ -813,7 +780,7 @@ async def generate_full_audit(battery_id: str, db: Session = Depends(get_db)):
                             fmt["kv_warn"])
 
         # ══════════════════════════════════════════════════════════════════════
-        # SHEET 6 — WELDING  (pure KV, no chart)
+        # SHEET 6 — WELDING
         # ══════════════════════════════════════════════════════════════════════
         ws6 = wb.add_worksheet("Welding")
         ws6.hide_gridlines(2)
