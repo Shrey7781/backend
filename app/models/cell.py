@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, Float, ForeignKey, Index
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, Float, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -32,7 +32,12 @@ class Cell(Base):
     sorting_voltage = Column(Float, nullable=True)
     sorting_date    = Column(DateTime, nullable=True)
 
-    gradings = relationship("CellGrading", back_populates="cell")
+    gradings = relationship(
+        "CellGrading",
+        back_populates="cell",
+        uselist=False,          # 1-to-1: one master grading record per cell
+        lazy="select"
+    )
 
     def __repr__(self):
         return f"<Cell {self.cell_id} [{self.status}] ng:{self.ng_count}>"
@@ -62,5 +67,10 @@ class CellGrading(Base):
     cell = relationship("Cell", back_populates="gradings")
 
     __table_args__ = (
-        Index("ix_cell_brand_created", "brand", "test_date"),
+        # Enforce 1-to-1 at the DB level — prevents duplicate grading rows per cell
+        UniqueConstraint("cell_id", name="uq_cell_grading_cell_id"),
+        # Composite index for brand+date queries used by admin cell inventory
+        Index("ix_cell_brand_test_date", "brand", "test_date"),
+        # Index for fast status-based filtering in bulk queries
+        Index("ix_cell_grading_final_result", "final_result"),
     )

@@ -1,41 +1,45 @@
 from app.models.cell import Cell, CellGrading
 from sqlalchemy.orm import Session
 
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE: These functions are NO LONGER called by the upload endpoints.
+# The upload endpoints (cell_router.py) now do bulk in-memory processing
+# directly for performance at 40,000+ rows/day.
+#
+# These functions are kept here for:
+#   - replace-cell endpoint (single-record operations)
+#   - any future single-record grading/sorting needs
+#   - unit testing individual cell logic
+# ─────────────────────────────────────────────────────────────────────────────
 
-def update_cell_grading_logic(db: Session, cell: Cell, row_data: dict):
+
+def update_cell_grading_logic(db: Session, cell: Cell, row_data: dict) -> str:
     """
-    Upsert grading data for a cell.
+    Upsert grading data for a single cell.
 
-    Master cell record:
-    - Once a cell has status "pass" the master record is NEVER overwritten
-      (status, capacity, last_test_date all locked).
-    - If still "ng" or "pending", every new upload overwrites master +
-      increments ng_count on fail.
-
-    Grading detail record (cell_gradings):
-    - Always overwritten with latest data regardless of pass/fail.
+    Used by: replace-cell, unit tests.
+    NOT used by: /upload-grading (handled in bulk directly in cell_router.py)
 
     Returns:
-      "skipped"  — master was already passed; detail record still updated
-      "updated"  — master was updated (pass or ng)
+      "skipped"  — master already passed; detail record still updated
+      "updated"  — master updated (pass or ng)
     """
     already_passed = (cell.status == "pass")
 
-    # 1. Update master Cell record only if not already passed
     if not already_passed:
         is_pass = str(row_data.get('final Result', '')).strip().upper() == "PASS"
 
         if is_pass:
-            cell.status = "pass"
+            cell.status                   = "pass"
             cell.discharging_capacity_mah = row_data.get('Discharging Capacity(mAh)')
         else:
-            cell.status    = "ng"
-            cell.ng_count += 1
+            cell.status                   = "ng"
+            cell.ng_count                 = (cell.ng_count or 0) + 1
             cell.discharging_capacity_mah = row_data.get('Discharging Capacity(mAh)')
 
         cell.last_test_date = row_data.get('Date')
 
-    # 2. Always upsert the CellGrading detail record (latest data wins)
+    # Always upsert the CellGrading detail record
     existing_grading = db.query(CellGrading).filter(
         CellGrading.cell_id == cell.cell_id
     ).first()
@@ -57,45 +61,40 @@ def update_cell_grading_logic(db: Session, cell: Cell, row_data: dict):
     }
 
     if existing_grading:
-        for key, value in grading_data.items():
-            setattr(existing_grading, key, value)
+        for k, v in grading_data.items():
+            setattr(existing_grading, k, v)
     else:
         db.add(CellGrading(cell_id=cell.cell_id, **grading_data))
 
-    # 3. Return action taken
-    # NOTE: "skipped" means master was locked (already passed) but detail
-    # was still upserted. The router counts this separately from "updated".
     return "skipped" if already_passed else "updated"
 
 
-def update_sorting_data(db: Session, cell: Cell, row_data: dict):
+def update_sorting_data(db: Session, cell: Cell, row_data: dict) -> str:
     """
-    Apply sorting machine data (IR + voltage) to a cell.
+    Apply sorting machine data (IR + voltage) to a single cell.
 
-    Rules:
-    - Cell must have status "pass" — sorting is only done on passed cells.
-    - Always overwrites with latest sorting data (re-sorting is allowed).
-    - Returns "missing_data" if IR VALUE or VOLTAGE is absent in the row.
+    Used by: replace-cell, unit tests.
+    NOT used by: /upload-sorting (handled in bulk directly in cell_router.py)
 
     Returns:
       "sorted"           — data written successfully
       "error_not_passed" — cell has not passed grading
-      "missing_data"     — IR VALUE or VOLTAGE column missing/empty in this row
+      "missing_data"     — IR VALUE or VOLTAGE missing/empty in row
     """
     if cell.status != "pass":
         return "error_not_passed"
 
-    # FIX #9 — validate IR and voltage values before writing
     ir   = row_data.get('IR VALUE')
     volt = row_data.get('VOLTAGE')
 
     if ir is None or volt is None:
         return "missing_data"
 
-    cell.ir_value_m_ohm  = ir
-    cell.sorting_voltage = volt
+    cell.ir_value_m_ohm  = float(ir)
+    cell.sorting_voltage = float(volt)
 
-    if row_data.get('Date'):
-        cell.sorting_date = row_data.get('Date')
+    date = row_data.get('Date')
+    if date:
+        cell.sorting_date = date
 
     return "sorted"
