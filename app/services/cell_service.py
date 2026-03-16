@@ -9,10 +9,15 @@ def update_cell_grading_logic(db: Session, cell: Cell, row_data: dict):
     Master cell record:
     - Once a cell has status "pass" the master record is NEVER overwritten
       (status, capacity, last_test_date all locked).
-    - If still "ng" or "pending", every new upload overwrites master + increments ng_count on fail.
+    - If still "ng" or "pending", every new upload overwrites master +
+      increments ng_count on fail.
 
     Grading detail record (cell_gradings):
-    - Always overwritten with latest data regardless of pass/fail — full audit trail.
+    - Always overwritten with latest data regardless of pass/fail.
+
+    Returns:
+      "skipped"  — master was already passed; detail record still updated
+      "updated"  — master was updated (pass or ng)
     """
     already_passed = (cell.status == "pass")
 
@@ -22,7 +27,6 @@ def update_cell_grading_logic(db: Session, cell: Cell, row_data: dict):
 
         if is_pass:
             cell.status = "pass"
-            # NOTE: ocv_voltage_mv lives on CellGrading, NOT on Cell — not set here
             cell.discharging_capacity_mah = row_data.get('Discharging Capacity(mAh)')
         else:
             cell.status    = "ng"
@@ -32,22 +36,24 @@ def update_cell_grading_logic(db: Session, cell: Cell, row_data: dict):
         cell.last_test_date = row_data.get('Date')
 
     # 2. Always upsert the CellGrading detail record (latest data wins)
-    existing_grading = db.query(CellGrading).filter(CellGrading.cell_id == cell.cell_id).first()
+    existing_grading = db.query(CellGrading).filter(
+        CellGrading.cell_id == cell.cell_id
+    ).first()
 
     grading_data = {
-        "test_date":               row_data.get('Date'),
-        "lot":                     row_data.get('Lot'),
-        "brand":                   row_data.get('Brand'),
-        "specification":           row_data.get('Specification'),
-        "ocv_voltage_mv":          row_data.get('OCV Voltage(mV)'),
-        "upper_cutoff_mv":         row_data.get('Upper cut off(mV)'),
-        "lower_cutoff_mv":         row_data.get('Lower cut off(mV)'),
-        "discharging_capacity_mah":row_data.get('Discharging Capacity(mAh)'),
-        "result":                  row_data.get('Result'),
-        "final_soc_mah":           row_data.get('Final SOC(mAh)'),
-        "soc_result":              row_data.get('SOC Result'),
-        "final_cv_capacity":       row_data.get('Final CV Capacity'),
-        "final_result":            row_data.get('final Result'),
+        "test_date":                row_data.get('Date'),
+        "lot":                      row_data.get('Lot'),
+        "brand":                    row_data.get('Brand'),
+        "specification":            row_data.get('Specification'),
+        "ocv_voltage_mv":           row_data.get('OCV Voltage(mV)'),
+        "upper_cutoff_mv":          row_data.get('Upper cut off(mV)'),
+        "lower_cutoff_mv":          row_data.get('Lower cut off(mV)'),
+        "discharging_capacity_mah": row_data.get('Discharging Capacity(mAh)'),
+        "result":                   row_data.get('Result'),
+        "final_soc_mah":            row_data.get('Final SOC(mAh)'),
+        "soc_result":               row_data.get('SOC Result'),
+        "final_cv_capacity":        row_data.get('Final CV Capacity'),
+        "final_result":             row_data.get('final Result'),
     }
 
     if existing_grading:
@@ -57,6 +63,8 @@ def update_cell_grading_logic(db: Session, cell: Cell, row_data: dict):
         db.add(CellGrading(cell_id=cell.cell_id, **grading_data))
 
     # 3. Return action taken
+    # NOTE: "skipped" means master was locked (already passed) but detail
+    # was still upserted. The router counts this separately from "updated".
     return "skipped" if already_passed else "updated"
 
 
@@ -67,12 +75,25 @@ def update_sorting_data(db: Session, cell: Cell, row_data: dict):
     Rules:
     - Cell must have status "pass" — sorting is only done on passed cells.
     - Always overwrites with latest sorting data (re-sorting is allowed).
+    - Returns "missing_data" if IR VALUE or VOLTAGE is absent in the row.
+
+    Returns:
+      "sorted"           — data written successfully
+      "error_not_passed" — cell has not passed grading
+      "missing_data"     — IR VALUE or VOLTAGE column missing/empty in this row
     """
     if cell.status != "pass":
         return "error_not_passed"
 
-    cell.ir_value_m_ohm  = row_data.get('IR VALUE')
-    cell.sorting_voltage = row_data.get('VOLTAGE')
+    # FIX #9 — validate IR and voltage values before writing
+    ir   = row_data.get('IR VALUE')
+    volt = row_data.get('VOLTAGE')
+
+    if ir is None or volt is None:
+        return "missing_data"
+
+    cell.ir_value_m_ohm  = ir
+    cell.sorting_voltage = volt
 
     if row_data.get('Date'):
         cell.sorting_date = row_data.get('Date')
