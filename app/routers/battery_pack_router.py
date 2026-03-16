@@ -212,7 +212,29 @@ async def assign_cells_to_battery(
             invalid_cells.append({"cell_id": cid, "reason": "Cell already assigned to another pack"})
             continue
 
-        # Parameter range checks (only for ranges that were provided)
+        # ── Check 3: Grading must be PASS ─────────────────────────────────────
+        if cell.status != "pass":
+            invalid_cells.append({
+                "cell_id": cid,
+                "reason": f"Cell has not passed grading (current status: {cell.status.upper() if cell.status else 'NOT GRADED'})"
+            })
+            continue
+
+        # ── Check 4: NMC needs sorting file, LFP does not ────────────────────
+        if model:
+            cell_type = (model.cell_type.value if hasattr(model.cell_type, "value") else str(model.cell_type)).upper()
+            if cell_type == "NMC" and cell.sorting_date is None:
+                invalid_cells.append({
+                    "cell_id": cid,
+                    "reason": (
+                        "Sorting data not found. This battery uses NMC cells which require "
+                        "a sorting report before assembly. Please upload the sorting file for this cell."
+                    )
+                })
+                continue
+            # LFP: no sorting required — continue to range checks
+
+        # Parameter range checks (existing logic, unchanged)
         failures = _validate_cell_ranges(cell, battery)
         if failures:
             invalid_cells.append({
@@ -223,7 +245,6 @@ async def assign_cells_to_battery(
         else:
             valid_mappings.append(BatteryCellMapping(battery_id=data.battery_id, cell_id=cid))
             cells_to_mark.append(cell)
-
     # 6. Atomic — reject everything if any cell fails
     if invalid_cells:
         # Roll back the range save too since we're not committing
