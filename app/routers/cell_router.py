@@ -1,6 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
-from sqlalchemy import String
 import pandas as pd
 import io
 
@@ -25,13 +24,19 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
     - 1 bulk INSERT for new Cell records
     - 1 bulk INSERT for new CellGrading records
     - 1 final commit
-    Total: 3–5 DB round-trips regardless of file size.
+    Total: 3-5 DB round-trips regardless of file size.
 
     Business rules:
     - Auto-registers cell if not found in DB
     - Master Cell record locked once status = "pass" (no further overwrites)
     - ng_count incremented on every failed upload until cell passes
     - CellGrading detail record always upserted with latest data
+
+    Summary counters are mutually exclusive:
+    - auto_registered: brand new cell seen for the first time
+    - updated:         existing cell whose master record was updated
+    - skipped:         existing cell already at "pass" — master locked, detail still updated
+    - errors:          rows that threw an exception
     """
     contents = await file.read()
 
@@ -72,21 +77,30 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
             cell_id = str(row['Cell ID']).strip()
 
             # ── Auto-register if not found ────────────────────────────────────
-            cell = cell_map.get(cell_id)
-            if not cell:
+            cell        = cell_map.get(cell_id)
+            is_new_cell = (cell is None)
+
+            if is_new_cell:
                 cell = Cell(cell_id=cell_id, is_used=False, status="pending", ng_count=0)
                 new_cells.append(cell)
                 cell_map[cell_id] = cell
-                summary["auto_registered"] += 1
 
-            # ── Update master Cell record (locked once passed) ────────────────
+            # ── Update master Cell record ─────────────────────────────────────
+            # FIX: auto_registered and updated are mutually exclusive.
+            # Old code counted new cells in BOTH auto_registered AND updated
+            # because after creation the cell fell through to the update block.
+            # Now each cell is counted in exactly ONE counter per row.
             already_passed = (cell.status == "pass")
 
-            if not already_passed:
+            if already_passed:
+                # Master locked — grading detail still gets upserted below
+                summary["skipped"] += 1
+
+            else:
                 is_pass = str(row.get('final Result', '')).strip().upper() == "PASS"
 
                 if is_pass:
-                    cell.status                  = "pass"
+                    cell.status                   = "pass"
                     cell.discharging_capacity_mah = row.get('Discharging Capacity(mAh)')
                 else:
                     cell.status    = "ng"
@@ -94,9 +108,12 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
                     cell.discharging_capacity_mah = row.get('Discharging Capacity(mAh)')
 
                 cell.last_test_date = row.get('Date')
-                summary["updated"] += 1
-            else:
-                summary["skipped"] += 1
+
+                # New cell → auto_registered, existing cell → updated
+                if is_new_cell:
+                    summary["auto_registered"] += 1
+                else:
+                    summary["updated"] += 1
 
             # ── Upsert CellGrading detail (always updated) ────────────────────
             grading_data = {
@@ -190,13 +207,11 @@ async def upload_sorting(file: UploadFile = File(...), db: Session = Depends(get
             cell_id = str(row['Cell ID']).strip()
             cell    = cell_map.get(cell_id)
 
-            # ── Cell must exist ───────────────────────────────────────────────
             if not cell:
                 summary["not_found"] += 1
                 errors.append({"cell_id": cell_id, "reason": "Not found in database"})
                 continue
 
-            # ── Cell must have passed grading ─────────────────────────────────
             if cell.status != "pass":
                 summary["not_graded"] += 1
                 errors.append({
@@ -205,7 +220,6 @@ async def upload_sorting(file: UploadFile = File(...), db: Session = Depends(get
                 })
                 continue
 
-            # ── IR and voltage must be present in this row ────────────────────
             ir   = row.get('IR VALUE')
             volt = row.get('VOLTAGE')
 
@@ -217,7 +231,6 @@ async def upload_sorting(file: UploadFile = File(...), db: Session = Depends(get
                 })
                 continue
 
-            # ── Write sorting data ────────────────────────────────────────────
             cell.ir_value_m_ohm  = float(ir)
             cell.sorting_voltage = float(volt)
 
