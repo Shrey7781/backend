@@ -16,20 +16,20 @@ router = APIRouter(prefix="/battery-models", tags=["Battery Models"])
 
 class BatteryModelUpdate(BaseModel):
     """All fields optional — only provided fields are updated (PATCH semantics)."""
-    category:       Optional[str]         = None
-    series_count:   Optional[int]         = None
-    parallel_count: Optional[int]         = None
-    cell_type:      Optional[str]         = None   # "NMC" | "LFP"
-    bms_model:      Optional[str]         = None
-    welding_type:   Optional[str]         = None   # "Laser" | "Spot"
+    category:       Optional[str] = None
+    series_count:   Optional[int] = None
+    parallel_count: Optional[int] = None
+    cell_type:      Optional[str] = None   # "NMC" | "LFP"
+    bms_model:      Optional[str] = None
+    welding_type:   Optional[str] = None   # "LASER" | "SPOT"
 
 
-# ── Existing endpoints (keep as-is) ──────────────────────────────────────────
+# ── CRUD ──────────────────────────────────────────────────────────────────────
 
 @router.post("/", response_model=BatteryModelResponse)
 def create_battery_model(model: BatteryModelCreate, db: Session = Depends(get_db)):
-    db_model = db.query(BatteryModel).filter(BatteryModel.model_id == model.model_id).first()
-    if db_model:
+    existing = db.query(BatteryModel).filter(BatteryModel.model_id == model.model_id).first()
+    if existing:
         raise HTTPException(status_code=400, detail="Model ID already exists")
     new_model = BatteryModel(**model.model_dump())
     db.add(new_model)
@@ -51,13 +51,13 @@ def get_battery_models_summary(db: Session = Depends(get_db)):
     ).all()
     return [
         {
-            "model_id":      m.model_id,
-            "category":      m.category,
-            "cell_type":     m.cell_type.value if hasattr(m.cell_type, 'value') else m.cell_type,
-            "welding_type":  m.welding_type.value if hasattr(m.welding_type, 'value') else m.welding_type,
-            "bms_model":     m.bms_model,
-            "total_count":   m.series_count * m.parallel_count,
-            "series_count":  m.series_count,
+            "model_id":       m.model_id,
+            "category":       m.category,
+            "cell_type":      m.cell_type.value    if hasattr(m.cell_type,    'value') else m.cell_type,
+            "welding_type":   m.welding_type.value if hasattr(m.welding_type, 'value') else m.welding_type,
+            "bms_model":      m.bms_model,
+            "total_count":    m.series_count * m.parallel_count,
+            "series_count":   m.series_count,
             "parallel_count": m.parallel_count,
         }
         for m in models
@@ -91,8 +91,11 @@ def get_welding_type(battery_id: str, db: Session = Depends(get_db)):
         .first()
     if not result:
         raise HTTPException(status_code=404, detail=f"Battery ID {battery_id} not found in system")
-    battery_data, welding_type = result
-    return {"battery_id": battery_id, "welding_type": welding_type}
+    _, welding_type = result
+    return {
+        "battery_id":   battery_id,
+        "welding_type": welding_type.value if hasattr(welding_type, 'value') else welding_type,
+    }
 
 
 @router.patch("/{battery_id}/mark-ready")
@@ -101,31 +104,30 @@ def update_to_ready(battery_id: str, db: Session = Depends(get_db)):
     if not battery:
         raise HTTPException(status_code=404, detail="Battery not found")
     if battery.overall_status != "FG PENDING":
-        raise HTTPException(status_code=400, detail=f"Cannot mark as READY. Current status is {battery.overall_status}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot mark as READY. Current status is {battery.overall_status}"
+        )
     battery.overall_status = "READY TO DISPATCH"
     db.commit()
     return {"status": "success", "new_status": battery.overall_status}
 
 
-# ── New endpoints ─────────────────────────────────────────────────────────────
-
 @router.patch("/{model_id}/update", response_model=BatteryModelResponse)
 def update_battery_model(
     model_id: str,
-    updates: BatteryModelUpdate,
-    db: Session = Depends(get_db)
+    updates:  BatteryModelUpdate,
+    db:       Session = Depends(get_db)
 ):
     """
-    Partially update a battery model. Only fields that are explicitly provided
-    are changed — omitted fields stay as-is.
-    model_id itself is immutable (primary key).
+    Partially update a battery model. Only provided fields are changed.
+    model_id is immutable (primary key).
+    Blocks series/parallel changes if batteries are already linked.
     """
     db_model = db.query(BatteryModel).filter(BatteryModel.model_id == model_id).first()
     if not db_model:
         raise HTTPException(status_code=404, detail="Battery model not found")
 
-    # Check no batteries are already assembled under this model
-    # before allowing series/parallel changes (would break cell count integrity)
     if updates.series_count is not None or updates.parallel_count is not None:
         linked_count = db.query(Battery).filter(Battery.model_id == model_id).count()
         if linked_count > 0:
@@ -134,9 +136,7 @@ def update_battery_model(
                 detail=f"Cannot change series/parallel — {linked_count} battery pack(s) already use this model"
             )
 
-    patch_data = updates.model_dump(exclude_unset=True)
-
-    for field, value in patch_data.items():
+    for field, value in updates.model_dump(exclude_unset=True).items():
         setattr(db_model, field, value)
 
     db.commit()
@@ -146,10 +146,7 @@ def update_battery_model(
 
 @router.delete("/{model_id}")
 def delete_battery_model(model_id: str, db: Session = Depends(get_db)):
-    """
-    Delete a battery model. Blocked if any Battery records reference this model
-    to prevent orphaned production data.
-    """
+    """Blocked if any Battery records reference this model."""
     db_model = db.query(BatteryModel).filter(BatteryModel.model_id == model_id).first()
     if not db_model:
         raise HTTPException(status_code=404, detail="Battery model not found")
@@ -167,19 +164,24 @@ def delete_battery_model(model_id: str, db: Session = Depends(get_db)):
     return {"status": "deleted", "model_id": model_id}
 
 
+# ── Bulk Link ─────────────────────────────────────────────────────────────────
+
 @router.post("/bulk-link")
 async def bulk_link_batteries_to_models(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db:   Session    = Depends(get_db)
 ):
     """
-    Upload an Excel file with two required columns:
-        - battery_id   (barcode / serial number)
-        - model_name   (must exactly match an existing model_id)
+    Upload an Excel file with columns: battery_id, model_name.
 
-    Creates Battery records linked to their model with status PROD.
-    Skips rows where battery_id already exists.
-    Collects rows where model_name is not found as errors.
+    Performance:
+      1 query  → all referenced BatteryModel records  (IN lookup)
+      1 query  → all existing Battery records          (IN lookup)
+      All validation in-memory — zero DB queries in the loop
+      1 bulk insert + 1 commit
+
+    Total: 3 DB round-trips regardless of file size.
+    Previously: 2 queries × N rows.
     """
     if not file.filename.endswith(('.xlsx', '.xls')):
         raise HTTPException(status_code=400, detail="Please upload an Excel file (.xlsx or .xls)")
@@ -200,9 +202,9 @@ async def bulk_link_batteries_to_models(
             detail=f"Missing required columns: {missing}. Found: {list(df.columns)}"
         )
 
-    created = []
-    skipped = []
-    errors  = []
+    # ── Step 1: Parse and clean every row ────────────────────────────────────
+    parsed_rows = []
+    errors = []
 
     for idx, row in df.iterrows():
         battery_id = str(row['battery_id']).strip()
@@ -216,27 +218,63 @@ async def bulk_link_batteries_to_models(
             errors.append({"row": idx + 2, "battery_id": battery_id, "reason": "Empty model_name"})
             continue
 
-        # Verify model exists
-        model = db.query(BatteryModel).filter(BatteryModel.model_id == model_name).first()
-        if not model:
+        parsed_rows.append((idx + 2, battery_id, model_name))
+
+    # ── Step 2: Collect unique IDs for bulk fetch ─────────────────────────────
+    all_model_names = list({mn  for _, _, mn  in parsed_rows})
+    all_battery_ids = list({bid for _, bid, _ in parsed_rows})
+
+    # ── Step 3: ONE query — all referenced models ─────────────────────────────
+    models_in_db = db.query(BatteryModel.model_id).filter(
+        BatteryModel.model_id.in_(all_model_names)
+    ).all()
+    model_set = {m.model_id for m in models_in_db}
+
+    # ── Step 4: ONE query — all existing batteries ────────────────────────────
+    existing_in_db = db.query(Battery.battery_id).filter(
+        Battery.battery_id.in_(all_battery_ids)
+    ).all()
+    existing_set = {b.battery_id for b in existing_in_db}
+
+    # ── Step 5: Validate + build new records in-memory (zero DB queries) ──────
+    created       = []
+    skipped       = []
+    new_batteries = []
+    seen_in_file  = set()   # guard against duplicate battery_ids within the file
+
+    for row_num, battery_id, model_name in parsed_rows:
+
+        # Model must exist
+        if model_name not in model_set:
             errors.append({
-                "row":        idx + 2,
+                "row":        row_num,
                 "battery_id": battery_id,
                 "reason":     f"Model '{model_name}' not found in battery_models"
             })
             continue
 
-        # Skip if already registered
-        existing = db.query(Battery).filter(Battery.battery_id == battery_id).first()
-        if existing:
+        # Skip if already in DB
+        if battery_id in existing_set:
             skipped.append(battery_id)
             continue
 
-        new_battery = Battery(battery_id=battery_id, model_id=model_name)
-        db.add(new_battery)
+        # Skip duplicate rows within the same file
+        if battery_id in seen_in_file:
+            skipped.append(battery_id)
+            continue
+
+        new_batteries.append(Battery(battery_id=battery_id, model_id=model_name))
+        seen_in_file.add(battery_id)
         created.append(battery_id)
 
-    db.commit()
+    # ── Step 6: Bulk insert + single commit ───────────────────────────────────
+    try:
+        if new_batteries:
+            db.bulk_save_objects(new_batteries)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
     return {
         "status": "Complete",
