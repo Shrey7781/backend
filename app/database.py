@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 from botocore.exceptions import ClientError
 
 
-load_dotenv()
 
 def get_database_url():
 
@@ -29,12 +28,14 @@ def get_database_url():
         raise e
 
     secrets = json.loads(get_secret_value_response['SecretString'])
-    
-  
+    print("🔥 SECRET HOST:", secrets['host'])
     return f"postgresql://{secrets['username']}:{secrets['password']}@{secrets['host']}:{secrets['port']}/{secrets['dbname']}"
+
+
 
 SQLALCHEMY_DATABASE_URL = get_database_url()
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
+print("🔥 FINAL DB URL:", SQLALCHEMY_DATABASE_URL)
 
 SessionLocal = sessionmaker(
     autocommit=False,
