@@ -1,17 +1,17 @@
-# Web Framework
+
 fastapi
 uvicorn[standard]
+boto3
 
-# Database
+
 sqlalchemy
 psycopg2-binary
 
-# Data Processing
+
 pandas
 openpyxl
 xlsxwriter
 
-# Utilities
 python-dotenv
 python-multipart
 passlib[bcrypt]
