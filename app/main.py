@@ -17,7 +17,7 @@ app = FastAPI(title="Maxvolt Energies Production Portal")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["https://maxtrace.maxvoltenergy.com"],  
     allow_credentials=True,
     allow_methods=["*"],  
     allow_headers=["*"],
