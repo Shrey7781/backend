@@ -5,8 +5,8 @@ import enum
 
 
 class WeldingType(enum.Enum):
-    LASER = "Laser"
-    SPOT  = "Spot"
+    LASER = "LASER"
+    SPOT  = "SPOT"
 
 
 class CellType(enum.Enum):
