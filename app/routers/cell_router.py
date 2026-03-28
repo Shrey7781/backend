@@ -10,6 +10,41 @@ from app.core.signals import trigger_dashboard_update
 router = APIRouter(prefix="/cells", tags=["Cell Management"])
 
 
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+def _clean_str(val) -> str | None:
+    """
+    Convert a value to a clean string, handling pandas float reads of
+    integer Excel cells:
+
+        101.0       → "101"
+        4842231.0   → "4842231"
+        "TEN POWER" → "TEN POWER"   (strings unchanged)
+        NaN / None  → None
+
+    Root cause: Excel stores Cell ID and Lot as numbers. pandas reads
+    numeric columns as float64 by default, turning 101 into 101.0.
+    astype(str) then gives "101.0" instead of "101".
+    """
+    if val is None:
+        return None
+    if isinstance(val, float):
+        if pd.isna(val):
+            return None
+        # Whole-number float → strip decimal: 101.0 → "101"
+        return str(int(val)) if val == int(val) else str(val)
+    s = str(val).strip()
+    return s if s and s.lower() != 'nan' else None
+
+
+def _clean_cell_id_series(series: pd.Series) -> pd.Series:
+    """
+    Apply _clean_str logic to an entire pandas Series efficiently.
+    Used to fix the Cell ID column before building cell_ids list.
+    """
+    return series.apply(lambda x: _clean_str(x) if pd.notna(x) else None)
+
+
 # ── Page 1: Cell Grading Upload ───────────────────────────────────────────────
 
 @router.post("/upload-grading")
@@ -46,7 +81,11 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
         df = pd.read_csv(io.BytesIO(contents))
 
     df = df.dropna(subset=['Cell ID'])
-    df['Cell ID'] = df['Cell ID'].astype(str).str.strip()
+
+    # FIX: use _clean_cell_id_series instead of plain astype(str).str.strip()
+    # This converts 101.0 → "101" instead of "101.0"
+    df['Cell ID'] = _clean_cell_id_series(df['Cell ID'])
+    df = df[df['Cell ID'].notna()]   # drop any rows where cell_id became None
 
     # ── Validate required columns ─────────────────────────────────────────────
     required = ['Cell ID', 'final Result', 'Discharging Capacity(mAh)', 'Date']
@@ -74,7 +113,9 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
 
     for _, row in df.iterrows():
         try:
-            cell_id = str(row['Cell ID']).strip()
+            cell_id = _clean_str(row['Cell ID'])
+            if not cell_id:
+                continue
 
             # ── Auto-register if not found ────────────────────────────────────
             cell        = cell_map.get(cell_id)
@@ -86,14 +127,9 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
                 cell_map[cell_id] = cell
 
             # ── Update master Cell record ─────────────────────────────────────
-            # FIX: auto_registered and updated are mutually exclusive.
-            # Old code counted new cells in BOTH auto_registered AND updated
-            # because after creation the cell fell through to the update block.
-            # Now each cell is counted in exactly ONE counter per row.
             already_passed = (cell.status == "pass")
 
             if already_passed:
-                # Master locked — grading detail still gets upserted below
                 summary["skipped"] += 1
 
             else:
@@ -109,27 +145,28 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
 
                 cell.last_test_date = row.get('Date')
 
-                # New cell → auto_registered, existing cell → updated
                 if is_new_cell:
                     summary["auto_registered"] += 1
                 else:
                     summary["updated"] += 1
 
             # ── Upsert CellGrading detail (always updated) ────────────────────
+            # FIX: use _clean_str for all string fields so lot, brand etc.
+            # don't get stored as "4842231.0" when Excel has numeric values
             grading_data = {
                 "test_date":                row.get('Date'),
-                "lot":                      row.get('Lot'),
-                "brand":                    row.get('Brand'),
-                "specification":            row.get('Specification'),
+                "lot":                      _clean_str(row.get('Lot')),
+                "brand":                    _clean_str(row.get('Brand')),
+                "specification":            _clean_str(row.get('Specification')),
                 "ocv_voltage_mv":           row.get('OCV Voltage(mV)'),
                 "upper_cutoff_mv":          row.get('Upper cut off(mV)'),
                 "lower_cutoff_mv":          row.get('Lower cut off(mV)'),
                 "discharging_capacity_mah": row.get('Discharging Capacity(mAh)'),
-                "result":                   row.get('Result'),
-                "final_soc_mah":            row.get('Final SOC(mAh)'),
-                "soc_result":               row.get('SOC Result'),
-                "final_cv_capacity":        row.get('Final CV Capacity'),
-                "final_result":             row.get('final Result'),
+                "result":                   _clean_str(row.get('Result','')),
+                "final_soc_mah":            row.get('Final SOC(mAh)',0),
+                "soc_result":               _clean_str(row.get('SOC Result'),''),
+                "final_cv_capacity":        row.get('Final CV Capacity',0),
+                "final_result":             _clean_str(row.get('final Result')),
             }
 
             existing_grading = grading_map.get(cell_id)
@@ -182,7 +219,10 @@ async def upload_sorting(file: UploadFile = File(...), db: Session = Depends(get
     """
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents))
-    df['Cell ID'] = df['Cell ID'].astype(str).str.strip()
+
+    # FIX: same clean conversion for sorting file Cell IDs
+    df['Cell ID'] = _clean_cell_id_series(df['Cell ID'])
+    df = df[df['Cell ID'].notna()]
 
     # ── Validate required columns ─────────────────────────────────────────────
     required_columns = ['Cell ID', 'IR VALUE', 'VOLTAGE']
@@ -204,8 +244,11 @@ async def upload_sorting(file: UploadFile = File(...), db: Session = Depends(get
 
     for _, row in df.iterrows():
         try:
-            cell_id = str(row['Cell ID']).strip()
-            cell    = cell_map.get(cell_id)
+            cell_id = _clean_str(row['Cell ID'])
+            if not cell_id:
+                continue
+
+            cell = cell_map.get(cell_id)
 
             if not cell:
                 summary["not_found"] += 1

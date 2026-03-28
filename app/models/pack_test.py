@@ -14,8 +14,10 @@ class PackTest(Base):
     test_date          = Column(DateTime)       # Date
     specification      = Column(String(255))    # e.g. "60V 29Ah"
     cell_type          = Column(String(100))    # e.g. "NMC"
-    number_of_series   = Column(Integer)        # Number of series
-    number_of_parallel = Column(Integer)        # Number of parallel
+    # number_of_series   = Column(Integer)        # Number of series
+    # number_of_parallel = Column(Integer)        # Number of parallel
+    actual_cap = Column(Float)
+
 
     # Voltage & capacity parameters
     ocv_voltage          = Column(Float)        # OCV Voltage(V)
@@ -26,7 +28,7 @@ class PackTest(Base):
     # Result flags
     capacity_result = Column(String(50))        # Result (PASS/FAIL)
     idle_difference = Column(Float)             # Final idle Different
-    soc_result      = Column(String(50))        # SOC Result
+    idle_diff_res      = Column(String(50))        
     final_voltage   = Column(Float)             # Final Voltage
     final_result    = Column(String(50))        # final Result — PASS or FAIL
 
