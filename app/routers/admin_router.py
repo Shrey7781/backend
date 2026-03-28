@@ -1,6 +1,6 @@
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, load_only
 from sqlalchemy import func, case, literal_column, desc
 
 import traceback
@@ -10,6 +10,7 @@ from sqlalchemy import or_
 from datetime import datetime, date
 from typing import Optional
 from app.database import get_db
+
 
 from app.database import get_db, SessionLocal
 from app.models.cell import Cell
@@ -304,7 +305,15 @@ async def get_battery_traceability(
             joinedload(Battery.pdi_reports),
             joinedload(Battery.bms_record),
             joinedload(Battery.dispatch_record),
-            joinedload(Battery.pack_test)
+            joinedload(Battery.pack_test).options(
+                load_only(
+                    PackTest.final_result, 
+                    PackTest.battery_id,
+                    PackTest.test_date,
+                    PackTest.actual_cap,
+                    PackTest.final_voltage
+                   )
+            )
         )
 
         if battery_id:
