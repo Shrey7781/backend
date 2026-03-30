@@ -14,8 +14,6 @@ class PackTest(Base):
     test_date          = Column(DateTime)       # Date
     specification      = Column(String(255))    # e.g. "60V 29Ah"
     cell_type          = Column(String(100))    # e.g. "NMC"
-    # number_of_series   = Column(Integer)        # Number of series
-    # number_of_parallel = Column(Integer)        # Number of parallel
     actual_cap = Column(Float)
 
 

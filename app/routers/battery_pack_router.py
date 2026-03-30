@@ -389,10 +389,7 @@ async def upload_pack_report_excel(
                 "test_date":             row.get('Date'),
                 "specification":         str(row.get('Specification', '')),
                 "cell_type":             str(row.get('Cell type', '')),
-                # "number_of_series":      int(row.get('Number of sreies', 0)),
-                # "number_of_parallel":    int(row.get('Number of parallel', 0)),
                 "actual_cap": float(row.get('Actual Capacity(Ah)',0)),
-
                 "ocv_voltage":           float(row.get('OCV Voltage(V)', 0)),
                 "upper_cutoff":          float(row.get('Upper cut off(V)', 0)),
                 "lower_cutoff":          float(row.get('Lower cut off(V)', 0)),
