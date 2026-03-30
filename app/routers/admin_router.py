@@ -2,7 +2,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session, joinedload, load_only
 from sqlalchemy import func, case, literal_column, desc
-
+from sqlalchemy import text
 import traceback
 from typing import List
 
@@ -305,7 +305,7 @@ async def get_battery_traceability(
             joinedload(Battery.pdi_reports),
             joinedload(Battery.bms_record),
             joinedload(Battery.dispatch_record),
-            joinedload(Battery.pack_test)
+            # ← no joinedload for pack_test at all
         )
 
         if battery_id:
@@ -326,19 +326,31 @@ async def get_battery_traceability(
 
         batteries = query.order_by(desc(Battery.created_at)).offset(offset).limit(page_size).all()
 
+        # ── Fetch ONLY final_result from pack_testing_reports ─────────────────
+        # Direct SQL — does NOT use the ORM model at all, so no column mismatch
+        battery_ids = [b.battery_id for b in batteries]
+        pack_results = db.execute(
+            text("""
+                SELECT battery_id, final_result
+                FROM pack_testing_reports
+                WHERE battery_id = ANY(:ids)
+            """),
+            {"ids": battery_ids}
+        ).fetchall()
+        pack_map = {row.battery_id: row.final_result for row in pack_results}
+
         results = []
         for b in batteries:
             pdi      = b.pdi_reports[0] if b.pdi_reports else None
             bms      = b.bms_record
             dispatch = b.dispatch_record
-            pack     = b.pack_test
 
             results.append({
                 "battery_id":           b.battery_id,
                 "model":                b.model_id,
-                "bms_id":               bms.bms_id          if bms      else "Not Assigned",
-                "pack_test_result":     pack.final_result    if pack     else "PENDING",
-                "pdi_result":           pdi.test_result      if pdi      else "PENDING",
+                "bms_id":               bms.bms_id        if bms      else "Not Assigned",
+                "pack_test_result":     pack_map.get(b.battery_id, "PENDING"),
+                "pdi_result":           pdi.test_result   if pdi      else "PENDING",
                 "status":               b.overall_status,
                 "created_at":           b.created_at.strftime("%Y-%m-%d %H:%M") if b.created_at else "N/A",
                 "assembled_at":         b.created_at.strftime("%d-%b-%Y")        if b.created_at else "N/A",
@@ -358,7 +370,6 @@ async def get_battery_traceability(
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Traceability failed: {str(e)}")
-
 
 @router.get("/cells/brands")
 async def get_unique_brands(db: Session = Depends(get_db)):
