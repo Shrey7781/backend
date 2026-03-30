@@ -305,15 +305,7 @@ async def get_battery_traceability(
             joinedload(Battery.pdi_reports),
             joinedload(Battery.bms_record),
             joinedload(Battery.dispatch_record),
-            joinedload(Battery.pack_test).options(
-                load_only(
-                    PackTest.final_result, 
-                    PackTest.battery_id,
-                    PackTest.test_date,
-                    PackTest.actual_cap,
-                    PackTest.final_voltage
-                   )
-            )
+            joinedload(Battery.pack_test)
         )
 
         if battery_id:
