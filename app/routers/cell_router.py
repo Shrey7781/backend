@@ -164,7 +164,7 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
                 "discharging_capacity_mah": row.get('Discharging Capacity(mAh)'),
                 "result":                   _clean_str(row.get('Result','')),
                 "final_soc_mah":            row.get('Final SOC(mAh)',0),
-                "soc_result":               _clean_str(row.get('SOC Result'),''),
+                "soc_result":               _clean_str(row.get('SOC Result','')),
                 "final_cv_capacity":        row.get('Final CV Capacity',0),
                 "final_result":             _clean_str(row.get('final Result')),
             }
