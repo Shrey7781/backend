@@ -82,6 +82,9 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
 
     df = df.dropna(subset=['Cell ID'])
 
+    import numpy as np
+    df = df.replace({pd.NA: None, np.nan: None})
+
     # FIX: use _clean_cell_id_series instead of plain astype(str).str.strip()
     # This converts 101.0 → "101" instead of "101.0"
     df['Cell ID'] = _clean_cell_id_series(df['Cell ID'])
@@ -150,23 +153,21 @@ async def upload_grading(file: UploadFile = File(...), db: Session = Depends(get
                 else:
                     summary["updated"] += 1
 
-            # ── Upsert CellGrading detail (always updated) ────────────────────
-            # FIX: use _clean_str for all string fields so lot, brand etc.
-            # don't get stored as "4842231.0" when Excel has numeric values
+            
             grading_data = {
                 "test_date":                row.get('Date'),
                 "lot":                      _clean_str(row.get('Lot')),
                 "brand":                    _clean_str(row.get('Brand')),
                 "specification":            _clean_str(row.get('Specification')),
-                "ocv_voltage_mv":           row.get('OCV Voltage(mV)'),
-                "upper_cutoff_mv":          row.get('Upper cut off(mV)'),
-                "lower_cutoff_mv":          row.get('Lower cut off(mV)'),
-                "discharging_capacity_mah": row.get('Discharging Capacity(mAh)'),
-                "result":                   _clean_str(row.get('Result','')),
-                "final_soc_mah":            row.get('Final SOC(mAh)',0),
-                "soc_result":               _clean_str(row.get('SOC Result','')),
-                "final_cv_capacity":        row.get('Final CV Capacity',0),
-                "final_result":             _clean_str(row.get('final Result')),
+                "ocv_voltage_mv":           row.get('OCV Voltage(mV)', 0),
+                "upper_cutoff_mv":          row.get('Upper cut off(mV)', 0),
+                "lower_cutoff_mv":          row.get('Lower cut off(mV)', 0),
+                "discharging_capacity_mah": row.get('Discharging Capacity(mAh)', 0),
+                "result":                   _clean_str(row.get('Result', '')),
+                "final_soc_mah":            row.get('Final SOC(mAh)', 0),
+                "soc_result":               _clean_str(row.get('SOC Result', '')), # FIXED PARENTHESES
+                "final_cv_capacity":        row.get('Final CV Capacity', 0),
+                "final_result":             _clean_str(row.get('final Result', '')),
             }
 
             existing_grading = grading_map.get(cell_id)
